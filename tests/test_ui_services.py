@@ -3,6 +3,7 @@ from pathlib import Path
 from notes_lifelog_rag.analysis.service import analyze_all
 from notes_lifelog_rag.db import schema
 from notes_lifelog_rag.ingest.importer import ingest_directory
+from notes_lifelog_rag.timeline.service import TimelineItem
 from notes_lifelog_rag.ui import renderers
 from notes_lifelog_rag.ui import services
 
@@ -80,6 +81,61 @@ def test_render_suggestions_are_clickable_and_escape_html() -> None:
     assert "suggestion-list" in html
     assert 'data-note-choice=' in html
     assert "note-card suggestion-card selected" in html
+
+
+def test_review_timeline_and_reflection_cards_are_clickable_and_escape_html() -> None:
+    qa_html = renderers.render_quality_warnings(
+        [
+            {
+                "warning_type": "low_confidence",
+                "note_id": "note-1",
+                "title": "<b>QA</b>",
+                "source_path": "<script>src</script>",
+                "issue": "<img src=x>",
+                "confidence": 0.2,
+                "importance": 0.9,
+                "evidence": [{"note_id": "note-1", "quote": "<script>x</script>"}],
+            }
+        ],
+        selected_note_id="note-1",
+    )
+    timeline_html = renderers.render_timeline_cards(
+        [
+            TimelineItem(
+                item_type="event",
+                note_id="note-2",
+                title="<b>Event</b>",
+                summary="<script>bad</script>",
+                date_label="2026-05",
+                date_confidence="high",
+                source_title="Source <img>",
+                source_path="src.md",
+                confidence=0.8,
+                importance=0.7,
+                evidence=[{"note_id": "note-2", "quote": "<img src=x>"}],
+            )
+        ],
+        selected_note_id="note-2",
+    )
+    reflection_html = renderers.render_reflection_list(
+        [
+            {
+                "month": "2026-05",
+                "summary": {"reminder_messages": ["<script>bad</script>"]},
+                "confidence": 0.6,
+                "importance": 0.8,
+                "updated_at": "2026-05-19",
+                "evidence": [{"note_id": "note-3", "quote": "<img src=x>"}],
+            }
+        ],
+        selected_note_id="note-3",
+    )
+
+    for html in [qa_html, timeline_html, reflection_html]:
+        assert "<script>" not in html
+        assert "<img" not in html
+        assert 'data-note-choice=' in html
+        assert "note-card selected" in html
 
 
 def test_render_note_detail_handles_missing_outputs() -> None:

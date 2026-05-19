@@ -271,7 +271,7 @@ def render_reflection(reflection: ReflectionReport | dict[str, Any] | None) -> s
     """
 
 
-def render_reflection_list(reflections: list[dict[str, Any]]) -> str:
+def render_reflection_list(reflections: list[dict[str, Any]], *, selected_note_id: str | None = None) -> str:
     if not reflections:
         return render_empty_state("Monthly reflections are not generated yet.")
     cards = []
@@ -279,15 +279,19 @@ def render_reflection_list(reflections: list[dict[str, Any]]) -> str:
         summary = item.get("summary") or {}
         messages = summary.get("reminder_messages") or []
         preview = messages[0] if messages else "Reflection summary is available."
+        note_id = _first_evidence_note_id(item.get("evidence") or summary.get("evidence") or [])
+        title = f"{item.get('month') or 'unknown'} Reflection"
+        selected = "selected" if selected_note_id and note_id.startswith(selected_note_id) else ""
+        click_attrs = _note_click_attrs(note_id, title)
         cards.append(
             f"""
-            <article class="thought-card">
+            <article class="thought-card note-card {selected}"{click_attrs}>
               <div class="section-title-row">
-                <h3>{escape(item.get("month") or "unknown")} Reflection</h3>
+                <h3>{escape(title)}</h3>
                 <div>{render_confidence_pill(item.get("confidence"))}{render_importance_pill(item.get("importance"))}</div>
               </div>
               <p>{escape(str(preview))}</p>
-              <div class="note-meta"><span>updated {escape(item.get("updated_at") or "")}</span></div>
+              <div class="note-meta"><span>updated {escape(item.get("updated_at") or "")}</span><span>{escape(note_id[:12])}</span></div>
               {render_evidence_card(item.get("evidence") or [])}
             </article>
             """
@@ -327,20 +331,24 @@ def render_suggestions(suggestions: list[dict[str, Any]], *, selected_note_id: s
     return '<section class="timeline-cards suggestion-list">' + "".join(cards) + "</section>"
 
 
-def render_quality_warnings(warnings: list[dict[str, Any]]) -> str:
+def render_quality_warnings(warnings: list[dict[str, Any]], *, selected_note_id: str | None = None) -> str:
     if not warnings:
         return render_empty_state("QA warnings are clear for the current filter.")
     rows = []
     for item in warnings:
+        note_id = str(item.get("note_id") or "")
+        title = str(item.get("title") or item.get("warning_type") or "warning")
+        selected = "selected" if selected_note_id and note_id.startswith(selected_note_id) else ""
+        click_attrs = _note_click_attrs(note_id, title)
         rows.append(
             f"""
-            <article class="event-card">
+            <article class="event-card note-card {selected}"{click_attrs}>
               <div class="section-title-row">
-                <h3>{escape(item.get("warning_type") or "warning")} · {escape(item.get("title") or "")}</h3>
+                <h3>{escape(item.get("warning_type") or "warning")} · {escape(title)}</h3>
                 <div>{render_confidence_pill(item.get("confidence"))}{render_importance_pill(item.get("importance"))}</div>
               </div>
               <p>{escape(item.get("issue") or "")}</p>
-              <div class="note-meta"><span>{escape(str(item.get("note_id") or "")[:12])}</span><span>{escape(item.get("source_path") or "")}</span></div>
+              <div class="note-meta"><span>{escape(note_id[:12])}</span><span>{escape(item.get("source_path") or "")}</span></div>
               {render_evidence_card(item.get("evidence") or [])}
             </article>
             """
@@ -452,14 +460,17 @@ def render_importance_pill(value: Any) -> str:
     return f'<span class="importance-pill {tone}">imp {number:.2f}</span>'
 
 
-def render_timeline_cards(items: list[TimelineItem]) -> str:
+def render_timeline_cards(items: list[TimelineItem], *, selected_note_id: str | None = None) -> str:
     if not items:
         return render_empty_state("この月のtimeline候補はまだありません。")
     cards = []
     for item in items:
+        selected = "selected" if selected_note_id and item.note_id.startswith(selected_note_id) else ""
+        title = item.source_title or item.title
+        click_attrs = _note_click_attrs(item.note_id, title)
         cards.append(
             f"""
-            <article class="event-card">
+            <article class="event-card note-card {selected}"{click_attrs}>
               <div class="section-title-row">
                 <h3>{escape(item.date_label)} · {escape(item.title)}</h3>
                 <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
@@ -471,6 +482,27 @@ def render_timeline_cards(items: list[TimelineItem]) -> str:
             """
         )
     return '<section class="timeline-cards">' + "".join(cards) + "</section>"
+
+
+def _note_click_attrs(note_id: str, title: str) -> str:
+    if not note_id:
+        return ""
+    choice = f"{note_id[:12]} · {title or 'Note'}"
+    return (
+        f' role="button" tabindex="0" data-note-choice="{escape(choice, quote=True)}"'
+        f' aria-label="Open source note {escape(title or "Note", quote=True)}"'
+    )
+
+
+def _first_evidence_note_id(evidence: list[dict[str, Any]] | dict[str, Any] | None) -> str:
+    if evidence is None:
+        return ""
+    values = evidence if isinstance(evidence, list) else [evidence]
+    for item in values:
+        note_id = str(item.get("note_id") or "") if isinstance(item, dict) else ""
+        if note_id:
+            return note_id
+    return ""
 
 
 def _render_reflection_card(reflection: dict[str, Any] | None) -> str:

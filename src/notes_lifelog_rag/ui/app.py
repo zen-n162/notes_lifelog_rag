@@ -67,6 +67,13 @@ def create_app():
     month_choices = [""] + [row["month"] for row in initial_state["months"]]
     initial_reflection_month = month_choices[1] if len(month_choices) > 1 else ""
     initial_reflections = services.list_reflections()
+    initial_qa_warnings = services.get_quality_warnings(limit=50)
+    initial_qa_selected = _first_warning_choice(initial_qa_warnings)
+    initial_timeline_items = services.get_timeline(limit=100)
+    initial_timeline_selected = _first_timeline_choice(initial_timeline_items)
+    initial_reflection_selected = _first_reflection_choice(initial_reflections)
+    initial_suggestions = services.list_suggestions(limit=50)
+    initial_suggestion_selected = _first_suggestion_choice(initial_suggestions)
 
     with gr.Blocks(title="Notes LifeLog", elem_id="notes-root") as demo:
         with gr.Tabs(selected="Notes Workspace"):
@@ -288,8 +295,20 @@ def create_app():
                     qa_month = gr.Dropdown(month_choices, value="", label="Month")
                     qa_limit = gr.Slider(10, 200, value=50, step=10, label="Limit")
                     qa_btn = gr.Button("Generate QA Report", variant="primary")
-                qa_output = gr.HTML(renderers.render_quality_warnings(services.get_quality_warnings(limit=50)))
-                qa_btn.click(lambda m, l: renderers.render_quality_warnings(services.get_quality_warnings(month=m or None, limit=int(l))), inputs=[qa_month, qa_limit], outputs=[qa_output])
+                qa_state = gr.State(initial_qa_warnings)
+                with gr.Row():
+                    with gr.Column(scale=2, min_width=420, elem_classes=["note-list-shell"]):
+                        qa_output = gr.HTML(
+                            renderers.render_quality_warnings(
+                                initial_qa_warnings,
+                                selected_note_id=services.extract_note_id(initial_qa_selected),
+                            ),
+                            js_on_load=NOTE_CARD_CLICK_JS,
+                        )
+                    with gr.Column(scale=3, min_width=520, elem_classes=["detail-shell"]):
+                        qa_detail = gr.HTML(renderers.render_note_detail(services.get_note_detail(initial_qa_selected)))
+                qa_btn.click(_refresh_qa_tab, inputs=[qa_month, qa_limit], outputs=[qa_output, qa_detail, qa_state])
+                qa_output.click(_select_qa_card, inputs=[qa_state], outputs=[qa_output, qa_detail], show_progress="hidden")
 
             with gr.Tab("Timeline"):
                 gr.Markdown("## Timeline\nEvents and thoughts, ordered for monthly rediscovery.")
@@ -298,12 +317,24 @@ def create_app():
                     timeline_sort = gr.Dropdown(["date", "importance"], value="date", label="Sort")
                     timeline_limit = gr.Slider(20, 200, value=100, step=20, label="Limit")
                     timeline_btn = gr.Button("Refresh Timeline", variant="primary")
-                timeline_output = gr.HTML(renderers.render_timeline_cards(services.get_timeline(limit=100)))
+                timeline_state = gr.State(initial_timeline_items)
+                with gr.Row():
+                    with gr.Column(scale=2, min_width=420, elem_classes=["note-list-shell"]):
+                        timeline_output = gr.HTML(
+                            renderers.render_timeline_cards(
+                                initial_timeline_items,
+                                selected_note_id=services.extract_note_id(initial_timeline_selected),
+                            ),
+                            js_on_load=NOTE_CARD_CLICK_JS,
+                        )
+                    with gr.Column(scale=3, min_width=520, elem_classes=["detail-shell"]):
+                        timeline_detail = gr.HTML(renderers.render_note_detail(services.get_note_detail(initial_timeline_selected)))
                 timeline_btn.click(
-                    lambda m, s, l: renderers.render_timeline_cards(services.get_timeline(m or None, sort=s, limit=int(l))),
+                    _refresh_timeline_tab,
                     inputs=[timeline_month, timeline_sort, timeline_limit],
-                    outputs=[timeline_output],
+                    outputs=[timeline_output, timeline_detail, timeline_state],
                 )
+                timeline_output.click(_select_timeline_card, inputs=[timeline_state], outputs=[timeline_output, timeline_detail], show_progress="hidden")
 
             with gr.Tab("Reflections"):
                 gr.Markdown("## Reflections\nMonthly reflections built from thoughts first, events second, summaries third.")
@@ -311,12 +342,29 @@ def create_app():
                     reflection_month = gr.Dropdown(month_choices, value=initial_reflection_month, label="Month")
                     reflection_force = gr.Checkbox(label="force regenerate", value=False)
                     reflection_btn = gr.Button("Generate / Refresh Reflection", variant="primary")
-                reflection_list = gr.HTML(renderers.render_reflection_list(initial_reflections))
-                reflection_output = gr.HTML(_stored_reflection_detail(initial_reflection_month, initial_reflections))
+                reflection_state = gr.State(initial_reflections)
+                with gr.Row():
+                    with gr.Column(scale=2, min_width=420, elem_classes=["note-list-shell"]):
+                        reflection_list = gr.HTML(
+                            renderers.render_reflection_list(
+                                initial_reflections,
+                                selected_note_id=services.extract_note_id(initial_reflection_selected),
+                            ),
+                            js_on_load=NOTE_CARD_CLICK_JS,
+                        )
+                        reflection_output = gr.HTML(_stored_reflection_detail(initial_reflection_month, initial_reflections))
+                    with gr.Column(scale=3, min_width=520, elem_classes=["detail-shell"]):
+                        reflection_detail = gr.HTML(renderers.render_note_detail(services.get_note_detail(initial_reflection_selected)))
                 reflection_btn.click(
-                    lambda m, f: renderers.render_reflection(services.generate_reflections(month=m or None, force=bool(f))[0] if m else services.get_reflection(None)),
+                    _refresh_reflection_tab,
                     inputs=[reflection_month, reflection_force],
-                    outputs=[reflection_output],
+                    outputs=[reflection_list, reflection_output, reflection_detail, reflection_state],
+                )
+                reflection_list.click(
+                    _select_reflection_card,
+                    inputs=[reflection_state],
+                    outputs=[reflection_list, reflection_detail],
+                    show_progress="hidden",
                 )
 
             with gr.Tab("Suggestions"):
@@ -329,16 +377,33 @@ def create_app():
                     suggestion_btn = gr.Button("Generate Suggestions", variant="primary")
                     suggestion_refresh = gr.Button("Refresh")
                 suggestion_status = gr.Markdown()
-                suggestion_output = gr.HTML(renderers.render_suggestions(services.list_suggestions(limit=50)))
+                suggestion_state = gr.State(initial_suggestions)
+                with gr.Row():
+                    with gr.Column(scale=2, min_width=420, elem_classes=["note-list-shell"]):
+                        suggestion_output = gr.HTML(
+                            renderers.render_suggestions(
+                                initial_suggestions,
+                                selected_note_id=services.extract_note_id(initial_suggestion_selected),
+                            ),
+                            js_on_load=NOTE_CARD_CLICK_JS,
+                        )
+                    with gr.Column(scale=3, min_width=520, elem_classes=["detail-shell"]):
+                        suggestion_detail = gr.HTML(renderers.render_note_detail(services.get_note_detail(initial_suggestion_selected)))
                 suggestion_btn.click(
                     _generate_suggestions_tab,
                     inputs=[suggestion_limit, suggestion_month, suggestion_today, suggestion_force],
-                    outputs=[suggestion_status, suggestion_output],
+                    outputs=[suggestion_status, suggestion_output, suggestion_detail, suggestion_state],
                 )
                 suggestion_refresh.click(
-                    lambda l: renderers.render_suggestions(services.list_suggestions(limit=int(l))),
+                    _refresh_suggestions_tab,
                     inputs=[suggestion_limit],
-                    outputs=[suggestion_output],
+                    outputs=[suggestion_output, suggestion_detail, suggestion_state],
+                )
+                suggestion_output.click(
+                    _select_suggestion_card,
+                    inputs=[suggestion_state],
+                    outputs=[suggestion_output, suggestion_detail],
+                    show_progress="hidden",
                 )
 
             with gr.Tab("Models / Settings"):
@@ -502,6 +567,94 @@ def _select_workspace_note_from_card(notes: list[dict] | None, scope: str | None
     return _select_workspace_note(choice, notes, scope)
 
 
+def _refresh_qa_tab(month: str | None, limit: int):
+    warnings = services.get_quality_warnings(month=month or None, limit=int(limit))
+    selected = _first_warning_choice(warnings)
+    selected_id = services.extract_note_id(selected)
+    return (
+        renderers.render_quality_warnings(warnings, selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(selected)),
+        warnings,
+    )
+
+
+def _select_qa_card(warnings: list[dict] | None, evt: EventData = None):
+    choice = _event_note_choice(evt)
+    selected_id = services.extract_note_id(choice)
+    return (
+        renderers.render_quality_warnings(warnings or [], selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(choice)),
+    )
+
+
+def _refresh_timeline_tab(month: str | None, sort: str, limit: int):
+    items = services.get_timeline(month or None, sort=sort, limit=int(limit))
+    selected = _first_timeline_choice(items)
+    selected_id = services.extract_note_id(selected)
+    return (
+        renderers.render_timeline_cards(items, selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(selected)),
+        items,
+    )
+
+
+def _select_timeline_card(items: list | None, evt: EventData = None):
+    choice = _event_note_choice(evt)
+    selected_id = services.extract_note_id(choice)
+    return (
+        renderers.render_timeline_cards(items or [], selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(choice)),
+    )
+
+
+def _refresh_reflection_tab(month: str | None, force: bool):
+    selected_month = month or None
+    if selected_month:
+        reflection_html = renderers.render_reflection(
+            services.generate_reflections(month=selected_month, force=bool(force))[0]
+        )
+    else:
+        reflection_html = renderers.render_reflection(services.get_reflection(None))
+    reflections = services.list_reflections()
+    selected = _first_reflection_choice(reflections)
+    selected_id = services.extract_note_id(selected)
+    return (
+        renderers.render_reflection_list(reflections, selected_note_id=selected_id),
+        reflection_html,
+        renderers.render_note_detail(services.get_note_detail(selected)),
+        reflections,
+    )
+
+
+def _select_reflection_card(reflections: list[dict] | None, evt: EventData = None):
+    choice = _event_note_choice(evt)
+    selected_id = services.extract_note_id(choice)
+    return (
+        renderers.render_reflection_list(reflections or [], selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(choice)),
+    )
+
+
+def _refresh_suggestions_tab(limit: int):
+    suggestions = services.list_suggestions(limit=int(limit))
+    selected = _first_suggestion_choice(suggestions)
+    selected_id = services.extract_note_id(selected)
+    return (
+        renderers.render_suggestions(suggestions, selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(selected)),
+        suggestions,
+    )
+
+
+def _select_suggestion_card(suggestions: list[dict] | None, evt: EventData = None):
+    choice = _event_note_choice(evt)
+    selected_id = services.extract_note_id(choice)
+    return (
+        renderers.render_suggestions(suggestions or [], selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(choice)),
+    )
+
+
 def _ask_workspace(question: str, fallback_query: str) -> str:
     query = question.strip() or fallback_query.strip()
     result = services.ask_with_evidence(query, backend="auto", device="auto", limit=8)
@@ -614,7 +767,54 @@ def _run_reflections_job(month, force):
 def _generate_suggestions_tab(limit, month, today, force):
     result = services.generate_suggestions(limit=int(limit), month=month or None, today=bool(today), force=bool(force))
     status = f"created={result['created']}, skipped={result['skipped']}, candidates={result['candidates']}"
-    return status, renderers.render_suggestions(services.list_suggestions(limit=int(limit)))
+    suggestions = services.list_suggestions(limit=int(limit))
+    selected = _first_suggestion_choice(suggestions)
+    selected_id = services.extract_note_id(selected)
+    return (
+        status,
+        renderers.render_suggestions(suggestions, selected_note_id=selected_id),
+        renderers.render_note_detail(services.get_note_detail(selected)),
+        suggestions,
+    )
+
+
+def _event_note_choice(evt: EventData = None) -> str | None:
+    if evt is None:
+        return None
+    choice = getattr(evt, "note_choice", None)
+    if choice is None:
+        data = getattr(evt, "_data", {}) or {}
+        choice = data.get("note_choice")
+    return choice
+
+
+def _first_warning_choice(warnings: list[dict]) -> str | None:
+    for item in warnings:
+        note_id = str(item.get("note_id") or "")
+        if note_id:
+            title = item.get("title") or item.get("warning_type") or "QA warning"
+            return f"{note_id[:12]} · {title}"
+    return None
+
+
+def _first_timeline_choice(items: list) -> str | None:
+    for item in items:
+        note_id = str(getattr(item, "note_id", "") or "")
+        if note_id:
+            title = getattr(item, "source_title", None) or getattr(item, "title", None) or "Timeline note"
+            return f"{note_id[:12]} · {title}"
+    return None
+
+
+def _first_reflection_choice(reflections: list[dict]) -> str | None:
+    for item in reflections:
+        summary = item.get("summary") or {}
+        evidence = item.get("evidence") or summary.get("evidence") or []
+        for evidence_item in evidence:
+            note_id = str(evidence_item.get("note_id") or "")
+            if note_id:
+                return f"{note_id[:12]} · {item.get('month') or 'Reflection'}"
+    return None
 
 
 def _first_suggestion_choice(suggestions: list[dict]) -> str | None:

@@ -351,6 +351,10 @@ choosing **Suggestions** shows suggestion cards in the center pane; selecting on
 opens the source note and original body in the right detail pane. The
 Suggestions card stack has its own scroll area, so the right-side original note
 preview stays in place while you browse many rediscovery candidates.
+The dedicated **QA Review**, **Timeline**, **Reflections**, and **Suggestions**
+tabs also use selectable cards. Choosing a card opens the supporting source note
+in the right detail pane with its AI summary, events, thoughts, evidence, model
+run metadata, and original note body.
 
 **Analysis Health** appears in the workspace and settings. It shows summaries,
 category coverage, event coverage, thought coverage, embedding coverage,
