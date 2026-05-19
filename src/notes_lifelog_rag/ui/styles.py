@@ -184,6 +184,17 @@ APP_CSS = """
   padding: 12px;
 }
 
+.suggestion-list {
+  max-height: calc(100vh - 330px);
+  overflow-y: auto;
+  padding: 12px;
+  scrollbar-gutter: stable;
+}
+
+.suggestion-list .suggestion-card {
+  margin-right: 4px;
+}
+
 .note-card {
   margin: 0 0 10px;
   padding: 14px;

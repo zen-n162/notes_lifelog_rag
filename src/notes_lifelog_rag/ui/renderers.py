@@ -324,7 +324,7 @@ def render_suggestions(suggestions: list[dict[str, Any]], *, selected_note_id: s
             </article>
             """
         )
-    return '<section class="timeline-cards">' + "".join(cards) + "</section>"
+    return '<section class="timeline-cards suggestion-list">' + "".join(cards) + "</section>"
 
 
 def render_quality_warnings(warnings: list[dict[str, Any]]) -> str:

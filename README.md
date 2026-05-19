@@ -348,7 +348,9 @@ cards and monthly reflection messages. Use **Suggestions** to generate and
 review “today rediscovery”, monthly reflection, important thought/event, revisit
 note, low-confidence review, and evidence-review candidates. In the workspace,
 choosing **Suggestions** shows suggestion cards in the center pane; selecting one
-opens the source note and original body in the right detail pane.
+opens the source note and original body in the right detail pane. The
+Suggestions card stack has its own scroll area, so the right-side original note
+preview stays in place while you browse many rediscovery candidates.
 
 **Analysis Health** appears in the workspace and settings. It shows summaries,
 category coverage, event coverage, thought coverage, embedding coverage,

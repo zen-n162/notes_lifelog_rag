@@ -77,6 +77,7 @@ def test_render_suggestions_are_clickable_and_escape_html() -> None:
     )
     assert "<script>" not in html
     assert "<img" not in html
+    assert "suggestion-list" in html
     assert 'data-note-choice=' in html
     assert "note-card suggestion-card selected" in html
 
