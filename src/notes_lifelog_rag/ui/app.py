@@ -26,6 +26,12 @@ SCOPE_CHOICES = [
 ]
 NOTE_CARD_CLICK_JS = """
 element.addEventListener('click', (event) => {
+  const monthCard = event.target.closest('.timeline-month-card[data-month-choice]');
+  if (monthCard && element.contains(monthCard)) {
+    event.preventDefault();
+    trigger('click', {month_choice: monthCard.getAttribute('data-month-choice')});
+    return;
+  }
   const card = event.target.closest('.note-card[data-note-choice]');
   if (!card || !element.contains(card)) {
     return;
@@ -36,6 +42,12 @@ element.addEventListener('click', (event) => {
 
 element.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' && event.key !== ' ') {
+    return;
+  }
+  const monthCard = event.target.closest('.timeline-month-card[data-month-choice]');
+  if (monthCard && element.contains(monthCard)) {
+    event.preventDefault();
+    trigger('click', {month_choice: monthCard.getAttribute('data-month-choice')});
     return;
   }
   const card = event.target.closest('.note-card[data-note-choice]');
@@ -71,6 +83,10 @@ def create_app():
     initial_qa_selected = _first_warning_choice(initial_qa_warnings)
     initial_timeline_items = services.get_timeline(limit=100)
     initial_timeline_selected = _first_timeline_choice(initial_timeline_items)
+    initial_timeline_years = [""] + services.list_timeline_years()
+    initial_timeline_year = initial_timeline_years[1] if len(initial_timeline_years) > 1 else ""
+    initial_timeline_month_snapshots = services.get_timeline_month_snapshots(year=initial_timeline_year or None, limit=24)
+    initial_timeline_month_selected = initial_timeline_month_snapshots[0].month if initial_timeline_month_snapshots else ""
     initial_reflection_selected = _first_reflection_choice(initial_reflections)
     initial_suggestions = services.list_suggestions(limit=50)
     initial_suggestion_selected = _first_suggestion_choice(initial_suggestions)
@@ -311,30 +327,48 @@ def create_app():
                 qa_output.click(_select_qa_card, inputs=[qa_state], outputs=[qa_output, qa_detail], show_progress="hidden")
 
             with gr.Tab("Timeline"):
-                gr.Markdown("## Timeline\nEvents and thoughts, ordered for monthly rediscovery.")
+                gr.Markdown("## Timeline\nMonthly memory cards that combine thoughts, events, summaries, categories, and evidence.")
                 with gr.Row():
-                    timeline_month = gr.Dropdown(month_choices, value="", label="Month")
-                    timeline_sort = gr.Dropdown(["date", "importance"], value="date", label="Sort")
-                    timeline_limit = gr.Slider(20, 200, value=100, step=20, label="Limit")
+                    timeline_year = gr.Dropdown(initial_timeline_years, value=initial_timeline_year, label="Year")
+                    timeline_month = gr.Dropdown(month_choices, value=initial_timeline_month_selected, label="Month")
+                    timeline_category = gr.Dropdown(category_choices, value="", label="Category")
+                    timeline_theme = gr.Textbox(label="Theme", placeholder="研究、就活、内省...")
+                with gr.Row():
+                    timeline_item_type = gr.Dropdown(["all", "thoughts", "events", "note_summaries", "suggestions"], value="all", label="Item type")
+                    timeline_sort = gr.Dropdown(["chronological_asc", "chronological_desc", "importance_desc"], value="chronological_desc", label="Sort")
+                    timeline_limit = gr.Slider(5, 60, value=24, step=1, label="Months")
+                    timeline_force = gr.Checkbox(label="force regenerate", value=False)
+                    timeline_dry_run = gr.Checkbox(label="dry run", value=True)
                     timeline_btn = gr.Button("Refresh Timeline", variant="primary")
-                timeline_state = gr.State(initial_timeline_items)
+                    timeline_generate_btn = gr.Button("Generate / Refresh Month")
+                timeline_state = gr.State(initial_timeline_month_snapshots)
+                timeline_status = gr.Markdown()
                 with gr.Row():
                     with gr.Column(scale=2, min_width=420, elem_classes=["note-list-shell"]):
                         timeline_output = gr.HTML(
-                            renderers.render_timeline_cards(
-                                initial_timeline_items,
-                                selected_note_id=services.extract_note_id(initial_timeline_selected),
+                            renderers.render_timeline_month_cards(
+                                initial_timeline_month_snapshots,
+                                selected_month=initial_timeline_month_selected,
                             ),
                             js_on_load=NOTE_CARD_CLICK_JS,
                         )
                     with gr.Column(scale=3, min_width=520, elem_classes=["detail-shell"]):
-                        timeline_detail = gr.HTML(renderers.render_note_detail(services.get_note_detail(initial_timeline_selected)))
+                        timeline_detail = gr.HTML(
+                            renderers.render_month_timeline_detail(
+                                initial_timeline_month_snapshots[0] if initial_timeline_month_snapshots else None
+                            )
+                        )
                 timeline_btn.click(
                     _refresh_timeline_tab,
-                    inputs=[timeline_month, timeline_sort, timeline_limit],
-                    outputs=[timeline_output, timeline_detail, timeline_state],
+                    inputs=[timeline_year, timeline_month, timeline_category, timeline_theme, timeline_item_type, timeline_sort, timeline_limit],
+                    outputs=[timeline_output, timeline_detail, timeline_state, timeline_status],
                 )
-                timeline_output.click(_select_timeline_card, inputs=[timeline_state], outputs=[timeline_output, timeline_detail], show_progress="hidden")
+                timeline_generate_btn.click(
+                    _generate_timeline_month_tab,
+                    inputs=[timeline_month, timeline_force, timeline_dry_run],
+                    outputs=[timeline_output, timeline_detail, timeline_state, timeline_status],
+                )
+                timeline_output.click(_select_timeline_month_card, inputs=[timeline_state], outputs=[timeline_output, timeline_detail], show_progress="hidden")
 
             with gr.Tab("Reflections"):
                 gr.Markdown("## Reflections\nMonthly reflections built from thoughts first, events second, summaries third.")
@@ -587,23 +621,43 @@ def _select_qa_card(warnings: list[dict] | None, evt: EventData = None):
     )
 
 
-def _refresh_timeline_tab(month: str | None, sort: str, limit: int):
-    items = services.get_timeline(month or None, sort=sort, limit=int(limit))
-    selected = _first_timeline_choice(items)
-    selected_id = services.extract_note_id(selected)
+def _refresh_timeline_tab(year, month, category, theme, item_type, sort, limit):
+    snapshots = services.get_timeline_month_snapshots(
+        year=year or None,
+        category=category or None,
+        theme=theme or None,
+        item_type=item_type or "all",
+        sort=sort or "chronological_desc",
+        limit=int(limit),
+    )
+    selected_month = month if month and any(snapshot.month == month for snapshot in snapshots) else (snapshots[0].month if snapshots else None)
+    selected = _snapshot_by_month(snapshots, selected_month)
+    status = f"{len(snapshots)} monthly timeline cards"
     return (
-        renderers.render_timeline_cards(items, selected_note_id=selected_id),
-        renderers.render_note_detail(services.get_note_detail(selected)),
-        items,
+        renderers.render_timeline_month_cards(snapshots, selected_month=selected_month),
+        renderers.render_month_timeline_detail(selected),
+        snapshots,
+        status,
     )
 
 
-def _select_timeline_card(items: list | None, evt: EventData = None):
-    choice = _event_note_choice(evt)
-    selected_id = services.extract_note_id(choice)
+def _generate_timeline_month_tab(month: str | None, force: bool, dry_run: bool):
+    status, snapshot = services.generate_timeline_snapshot_ui(month=month or None, force=bool(force), dry_run=bool(dry_run))
+    snapshots = [snapshot] if snapshot else []
     return (
-        renderers.render_timeline_cards(items or [], selected_note_id=selected_id),
-        renderers.render_note_detail(services.get_note_detail(choice)),
+        renderers.render_timeline_month_cards(snapshots, selected_month=snapshot.month if snapshot else None),
+        renderers.render_month_timeline_detail(snapshot),
+        snapshots,
+        status,
+    )
+
+
+def _select_timeline_month_card(snapshots: list | None, evt: EventData = None):
+    month = _event_month_choice(evt)
+    selected = _snapshot_by_month(snapshots or [], month)
+    return (
+        renderers.render_timeline_month_cards(snapshots or [], selected_month=month),
+        renderers.render_month_timeline_detail(selected),
     )
 
 
@@ -786,6 +840,25 @@ def _event_note_choice(evt: EventData = None) -> str | None:
         data = getattr(evt, "_data", {}) or {}
         choice = data.get("note_choice")
     return choice
+
+
+def _event_month_choice(evt: EventData = None) -> str | None:
+    if evt is None:
+        return None
+    choice = getattr(evt, "month_choice", None)
+    if choice is None:
+        data = getattr(evt, "_data", {}) or {}
+        choice = data.get("month_choice")
+    return choice
+
+
+def _snapshot_by_month(snapshots: list | None, month: str | None):
+    if not snapshots:
+        return None
+    for snapshot in snapshots:
+        if month and getattr(snapshot, "month", None) == month:
+            return snapshot
+    return snapshots[0]
 
 
 def _first_warning_choice(warnings: list[dict]) -> str | None:

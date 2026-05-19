@@ -268,15 +268,50 @@ python -m notes_lifelog_rag.cli summarize-notes --backend local
 ## Timeline And Reflections
 
 ```bash
+python -m notes_lifelog_rag.cli timeline-months
+python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --dry-run
+python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule
 python -m notes_lifelog_rag.cli timeline --month 2026-05
+python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
+python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
+python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
+python -m notes_lifelog_rag.cli timeline-qa --month 2026-05
 python -m notes_lifelog_rag.cli reflections --month 2026-05 --force
 python -m notes_lifelog_rag.cli generate-reflections --all-months
 ```
 
+Timeline is now a core monthly memory feature, not just a flat event list.
+`generate-timeline` builds month cards from `thoughts`, `events`,
+`note_summaries`, categories, suggestions, and existing reflections. Each
+monthly card answers:
+
+- what this month seemed to be about;
+- what you may have been thinking about;
+- what happened or progressed;
+- which themes and categories were dominant;
+- what changed or may be worth revisiting;
+- which evidence note quotes support the summary.
+
+The generated data is stored in `monthly_timeline_snapshots` and
+`monthly_timeline_items`. `--dry-run` previews the month card without writing DB
+rows. `--force` replaces only the target month's timeline snapshot/items; it
+does not truncate the whole database.
+
+Use `timeline-months` to see month coverage and whether a saved snapshot exists.
+Use `timeline --month 2026-05 --rich` to read a rich month detail. Use
+`timeline --year 2026 --monthly --order asc` to browse a year in chronological
+order. Use `timeline-report` to export a Markdown year/all-year timeline.
+
+`timeline-qa` checks whether month cards have evidence, thought/event summaries,
+reasonable confidence, and whether the card is too fallback-heavy. A
+`fallback_heavy` warning means the month card is leaning on note summaries or
+titles because structured thoughts/events are sparse; run `analyze-all`, then
+regenerate the timeline with `generate-timeline --month YYYY-MM --force`.
+
 Timeline and reflection outputs include `evidence`, `confidence`, and
-`importance`, and keep source note IDs visible. Phase 7 reflections prefer
-`thoughts`, then `events`, then `note_summaries`; title fallback is used only
-when structured analysis is sparse. Reflection output also includes coverage and
+`importance`, and keep source note IDs visible. Reflections prefer `thoughts`,
+then `events`, then `note_summaries`; title fallback is used only when
+structured analysis is sparse. Reflection output also includes coverage and
 quality warnings.
 
 ## Suggestions And QA Review
@@ -343,10 +378,11 @@ Phase 7 tabs:
 Use **Import** to initialize the DB and ingest exported notes. Use the global
 search in Notes Workspace for hybrid search; the Ask box gives a cautious answer
 from retrieved evidence rather than inventing unsupported history. Use the
-Timeline and Reflection sidebar modes or month selector to inspect event/thought
-cards and monthly reflection messages. Use **Suggestions** to generate and
-review “today rediscovery”, monthly reflection, important thought/event, revisit
-note, low-confidence review, and evidence-review candidates. In the workspace,
+Timeline tab to browse year/month memory cards: each month shows overview,
+thought summary, event summary, key themes, quality warnings, evidence, and
+related notes. Use **Suggestions** to generate and review “today rediscovery”,
+monthly reflection, important thought/event, revisit note, low-confidence
+review, and evidence-review candidates. In the workspace,
 choosing **Suggestions** shows suggestion cards in the center pane; selecting one
 opens the source note and original body in the right detail pane. The
 Suggestions card stack has its own scroll area, so the right-side original note

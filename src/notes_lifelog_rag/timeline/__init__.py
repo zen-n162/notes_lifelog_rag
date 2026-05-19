@@ -1,18 +1,33 @@
 from notes_lifelog_rag.timeline.service import (
+    MonthTimelineItem,
+    MonthTimelineSnapshot,
     ReflectionReport,
     TimelineItem,
     build_monthly_reflection,
+    build_month_timeline_items,
     build_timeline,
+    format_month_timeline_markdown,
     format_reflection_markdown,
+    format_timeline_report,
     format_timeline_markdown,
+    generate_month_timeline_snapshot,
+    list_timeline_months,
+    timeline_qa,
 )
 
 __all__ = [
+    "MonthTimelineItem",
+    "MonthTimelineSnapshot",
     "ReflectionReport",
     "TimelineItem",
     "build_monthly_reflection",
+    "build_month_timeline_items",
     "build_timeline",
+    "format_month_timeline_markdown",
     "format_reflection_markdown",
+    "format_timeline_report",
     "format_timeline_markdown",
+    "generate_month_timeline_snapshot",
+    "list_timeline_months",
+    "timeline_qa",
 ]
-

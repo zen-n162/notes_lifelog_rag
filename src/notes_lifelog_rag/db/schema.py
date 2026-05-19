@@ -143,6 +143,55 @@ CREATE TABLE IF NOT EXISTS monthly_reflections (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS monthly_timeline_snapshots (
+    id TEXT PRIMARY KEY,
+    month TEXT NOT NULL,
+    title TEXT,
+    overview TEXT,
+    thought_summary TEXT,
+    event_summary TEXT,
+    important_changes_json TEXT,
+    key_themes_json TEXT,
+    dominant_categories_json TEXT,
+    rediscovery_points_json TEXT,
+    revisit_reasons_json TEXT,
+    evidence_json TEXT,
+    quality_json TEXT,
+    source_counts_json TEXT,
+    source_hash TEXT,
+    model_name TEXT,
+    generated_by TEXT,
+    confidence REAL,
+    importance REAL,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(month, source_hash)
+);
+
+CREATE TABLE IF NOT EXISTS monthly_timeline_items (
+    id TEXT PRIMARY KEY,
+    month TEXT NOT NULL,
+    date_start TEXT,
+    date_end TEXT,
+    date_label TEXT,
+    item_type TEXT NOT NULL,
+    title TEXT,
+    summary TEXT,
+    detail TEXT,
+    themes_json TEXT,
+    categories_json TEXT,
+    emotion_json TEXT,
+    evidence_json TEXT,
+    source_table TEXT,
+    source_id TEXT,
+    source_note_id TEXT,
+    confidence REAL,
+    importance REAL,
+    date_confidence REAL,
+    sort_key TEXT,
+    created_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS model_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_name TEXT NOT NULL,
@@ -222,6 +271,9 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_thoughts_date_label ON thoughts(date_label)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_type_status ON suggestions(suggestion_type, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_suggestions_note ON suggestions(note_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_snapshots_month ON monthly_timeline_snapshots(month)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_items_month_sort ON monthly_timeline_items(month, sort_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_items_source_note ON monthly_timeline_items(source_note_id)")
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:

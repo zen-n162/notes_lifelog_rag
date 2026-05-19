@@ -19,12 +19,17 @@ from notes_lifelog_rag.runtime.cuda import collect_cuda_status
 from notes_lifelog_rag.runtime.device import effective_dtype, resolve_device
 from notes_lifelog_rag.search.hybrid import hybrid_search_notes
 from notes_lifelog_rag.timeline.service import (
+    MonthTimelineSnapshot,
     ReflectionReport,
     TimelineItem,
     build_monthly_reflection,
     build_timeline,
     format_reflection_markdown,
     format_timeline_markdown,
+    generate_month_timeline_snapshot,
+    list_month_timeline_snapshots,
+    list_timeline_months,
+    timeline_qa,
 )
 
 DEFAULT_NOTE_LIMIT = 80
@@ -43,6 +48,8 @@ def get_db_stats(db_path: str | Path | None = None) -> dict[str, int]:
         "thoughts",
         "suggestions",
         "monthly_reflections",
+        "monthly_timeline_snapshots",
+        "monthly_timeline_items",
         "model_runs",
         "import_errors",
     ]
@@ -496,6 +503,71 @@ def get_timeline(
     if sort == "importance":
         return sorted(items, key=lambda item: item.importance, reverse=True)
     return items
+
+
+def list_timeline_years(db_path: str | Path | None = None) -> list[str]:
+    months = list_timeline_months(db_path=db_path, order="desc")
+    years = sorted({item.month[:4] for item in months if item.month}, reverse=True)
+    return years
+
+
+def get_timeline_months(db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    return [item.to_dict() for item in list_timeline_months(db_path=db_path, order="desc")]
+
+
+def get_timeline_month_snapshots(
+    *,
+    year: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    item_type: str = "all",
+    sort: str = "chronological_desc",
+    limit: int = 24,
+    db_path: str | Path | None = None,
+) -> list[MonthTimelineSnapshot]:
+    order = "asc" if sort == "chronological_asc" else "desc"
+    snapshots = list_month_timeline_snapshots(year=year or None, db_path=db_path, order=order, limit=int(limit))
+    if category:
+        snapshots = [snapshot for snapshot in snapshots if category in snapshot.dominant_categories or category in snapshot.key_themes]
+    if theme:
+        snapshots = [
+            snapshot
+            for snapshot in snapshots
+            if any(theme in value for value in snapshot.key_themes + snapshot.dominant_categories)
+        ]
+    if item_type and item_type != "all":
+        key = "thought" if item_type == "thoughts" else "event" if item_type == "events" else item_type.rstrip("s")
+        snapshots = [snapshot for snapshot in snapshots if any(item.item_type == key for item in snapshot.items)]
+    if sort == "importance_desc":
+        snapshots = sorted(snapshots, key=lambda snapshot: snapshot.importance, reverse=True)
+    return snapshots[: int(limit)]
+
+
+def generate_timeline_snapshot_ui(
+    *,
+    month: str | None,
+    force: bool = False,
+    dry_run: bool = True,
+    backend: str = "rule",
+    db_path: str | Path | None = None,
+) -> tuple[str, MonthTimelineSnapshot | None]:
+    if not month:
+        return "Select a month before generating timeline.", None
+    if get_running_jobs().get("analyze_all"):
+        return "analyze-all is running. Timeline generation is disabled until it finishes.", None
+    snapshot = generate_month_timeline_snapshot(
+        month,
+        db_path=db_path,
+        backend=backend,
+        force=force,
+        dry_run=dry_run,
+    )
+    mode = "dry-run" if dry_run else "saved"
+    return f"timeline {mode}: {snapshot.month} items={len(snapshot.items)} warnings={len(snapshot.quality.get('warnings') or [])}", snapshot
+
+
+def get_timeline_qa(month: str | None = None, all_months: bool = False, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    return timeline_qa(month=month, all_months=all_months, db_path=db_path)
 
 
 def get_reflection(month: str | None = None, db_path: str | Path | None = None) -> ReflectionReport:

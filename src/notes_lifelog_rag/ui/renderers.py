@@ -3,7 +3,7 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
-from notes_lifelog_rag.timeline.service import ReflectionReport, TimelineItem
+from notes_lifelog_rag.timeline.service import MonthTimelineSnapshot, ReflectionReport, TimelineItem
 
 
 def render_sidebar(state: dict[str, Any], *, active_scope: str = "全ノート") -> str:
@@ -482,6 +482,114 @@ def render_timeline_cards(items: list[TimelineItem], *, selected_note_id: str | 
             """
         )
     return '<section class="timeline-cards">' + "".join(cards) + "</section>"
+
+
+def render_timeline_month_cards(
+    snapshots: list[MonthTimelineSnapshot],
+    *,
+    selected_month: str | None = None,
+) -> str:
+    if not snapshots:
+        return render_empty_state("Timeline month cards are not available yet. Run generate-timeline or refresh the filters.")
+    cards = []
+    for snapshot in snapshots:
+        selected = "selected" if selected_month == snapshot.month else ""
+        warning_badges = "".join(
+            f'<span class="note-badge review">{escape(str(warning))}</span>'
+            for warning in (snapshot.quality.get("warnings") or [])[:3]
+        )
+        themes = "".join(f'<span class="note-badge">{escape(theme)}</span>' for theme in snapshot.key_themes[:5])
+        counts = snapshot.source_counts
+        cards.append(
+            f"""
+            <article class="timeline-month-card note-card {selected}" role="button" tabindex="0"
+              data-month-choice="{escape(snapshot.month, quote=True)}"
+              aria-label="Open timeline month {escape(snapshot.month, quote=True)}">
+              <div class="section-title-row">
+                <h3>{escape(snapshot.month)} · {escape(snapshot.title)}</h3>
+                <div>{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}</div>
+              </div>
+              <p class="note-snippet">{escape(snapshot.overview)}</p>
+              <p class="note-snippet"><b>Thoughts</b>: {escape(snapshot.thought_summary)}</p>
+              <p class="note-snippet"><b>Events</b>: {escape(snapshot.event_summary)}</p>
+              <div class="badge-row">{themes}{warning_badges}</div>
+              <div class="note-meta">
+                <span>notes {int(counts.get("notes", 0))}</span>
+                <span>events {int(counts.get("events", 0))}</span>
+                <span>thoughts {int(counts.get("thoughts", 0))}</span>
+                <span>items {len(snapshot.items)}</span>
+              </div>
+            </article>
+            """
+        )
+    return '<section class="note-list timeline-month-list">' + "".join(cards) + "</section>"
+
+
+def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
+    if snapshot is None:
+        return render_empty_state("月を選択してください。")
+    warnings = "".join(render_warning_banner(str(item)) for item in (snapshot.quality.get("warnings") or [])[:5])
+    themes = "".join(f'<span class="note-badge">{escape(theme)}</span>' for theme in snapshot.key_themes)
+    categories = "".join(f'<span class="note-badge important">{escape(cat)}</span>' for cat in snapshot.dominant_categories)
+    changes = "".join(f"<li>{escape(item)}</li>" for item in snapshot.important_changes) or "<li>まだ十分な材料がありません。</li>"
+    rediscovery = "".join(f"<li>{escape(item)}</li>" for item in snapshot.rediscovery_points + snapshot.revisit_reasons) or "<li>まだ十分な材料がありません。</li>"
+    item_cards = "".join(_render_month_timeline_item(item) for item in snapshot.items[:80])
+    return f"""
+    <section class="detail-pane">
+      <article class="paper">
+        <div class="paper-kicker">Monthly Timeline Snapshot</div>
+        <h1 class="paper-title">{escape(snapshot.month)} · {escape(snapshot.title)}</h1>
+        <div class="metric-row">{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}<span class="score-pill">quality {float(snapshot.quality.get("quality_score") or 0.0):.2f}</span></div>
+        {warnings}
+        <section class="ai-summary-card">
+          <h2>この月の概要</h2>
+          <p>{escape(snapshot.overview)}</p>
+        </section>
+        <section class="paper-section">
+          <h2>この月に考えていたこと</h2>
+          <p>{escape(snapshot.thought_summary)}</p>
+        </section>
+        <section class="paper-section">
+          <h2>この月に起きたこと</h2>
+          <p>{escape(snapshot.event_summary)}</p>
+        </section>
+        <section class="paper-section">
+          <h2>重要テーマ</h2>
+          <div class="badge-row">{categories}{themes}</div>
+        </section>
+        <section class="paper-section">
+          <h2>重要な変化</h2>
+          <ul class="important-points">{changes}</ul>
+        </section>
+        <section class="paper-section">
+          <h2>見返す価値</h2>
+          <ul class="important-points">{rediscovery}</ul>
+        </section>
+        {render_evidence_card(snapshot.evidence)}
+        <section class="paper-section">
+          <h2>関連メモ / Timeline Items</h2>
+          <p class="muted">カードのnote_idを確認し、必要に応じてNotes Workspaceや各レビュータブで元メモを開けます。</p>
+          {item_cards or render_empty_state("この月のitemsはまだありません。")}
+        </section>
+      </article>
+    </section>
+    """
+
+
+def _render_month_timeline_item(item) -> str:
+    badges = "".join(f'<span class="note-badge">{escape(value)}</span>' for value in (item.categories + item.themes)[:5])
+    return f"""
+    <article class="event-card month-item-card">
+      <div class="section-title-row">
+        <h3>{escape(item.date_label or "日付不明")} · {escape(item.title)}</h3>
+        <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
+      </div>
+      <p>{escape(item.summary)}</p>
+      <div class="badge-row"><span class="note-badge important">{escape(item.item_type)}</span>{badges}</div>
+      <div class="note-meta"><span>{escape(item.source_note_id[:12])}</span><span>{escape(item.source_table)}</span></div>
+      {render_evidence_card(item.evidence)}
+    </article>
+    """
 
 
 def _note_click_attrs(note_id: str, title: str) -> str:

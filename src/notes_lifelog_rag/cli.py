@@ -30,8 +30,17 @@ from notes_lifelog_rag.search.hybrid import hybrid_search_notes
 from notes_lifelog_rag.timeline.service import (
     build_monthly_reflection,
     build_timeline,
+    format_month_timeline_markdown,
     format_reflection_markdown,
+    format_timeline_report,
     format_timeline_markdown,
+    generate_month_timeline_snapshot,
+    generate_timeline_snapshots,
+    get_month_sources,
+    get_month_timeline_snapshot,
+    list_month_timeline_snapshots,
+    list_timeline_months,
+    timeline_qa,
 )
 
 app = typer.Typer(
@@ -100,6 +109,8 @@ def stats_command(
             "thoughts",
             "suggestions",
             "monthly_reflections",
+            "monthly_timeline_snapshots",
+            "monthly_timeline_items",
             "model_runs",
             "chunk_embeddings",
             "import_errors",
@@ -637,10 +648,161 @@ def analyze_all_command(
 @app.command("timeline")
 def timeline_command(
     month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    year: Annotated[str | None, typer.Option("--year", help="YYYY year for monthly cards.")] = None,
+    monthly: Annotated[bool, typer.Option("--monthly", help="Show monthly memory cards.")] = False,
+    all_months: Annotated[bool, typer.Option("--all-months", help="Show every month as memory cards.")] = False,
+    rich: Annotated[bool, typer.Option("--rich", help="Show the month snapshot instead of raw items.")] = False,
+    order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
     limit: Annotated[int, typer.Option("--limit", help="Maximum timeline items.")] = 100,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
+    if rich or monthly or all_months or year:
+        if month and not monthly and not all_months:
+            snapshot = get_month_timeline_snapshot(month, db_path=db, generate_if_missing=True)
+            console.print(format_month_timeline_markdown(snapshot) if snapshot else "Timeline snapshot not found.")
+            return
+        snapshots = list_month_timeline_snapshots(year=year, db_path=db, order=order, limit=limit if limit else None)
+        console.print(format_timeline_report(snapshots, title=f"Timeline {year or 'All Months'}", order=order))
+        return
     console.print(format_timeline_markdown(build_timeline(month, db_path=db, limit=limit), month=month))
+
+
+@app.command("timeline-months")
+def timeline_months_command(
+    order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    rows = list_timeline_months(db_path=db, order=order)
+    table = Table(title="Timeline Months")
+    table.add_column("Month")
+    table.add_column("Notes", justify="right")
+    table.add_column("Summaries", justify="right")
+    table.add_column("Events", justify="right")
+    table.add_column("Thoughts", justify="right")
+    table.add_column("Suggestions", justify="right")
+    table.add_column("Snapshot")
+    table.add_column("Quality")
+    for row in rows:
+        table.add_row(
+            row.month,
+            str(row.notes_count),
+            str(row.summaries_count),
+            str(row.events_count),
+            str(row.thoughts_count),
+            str(row.suggestions_count),
+            "yes" if row.has_snapshot else "no",
+            row.quality,
+        )
+    console.print(table)
+
+
+@app.command("generate-timeline")
+def generate_timeline_command(
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    all_months: Annotated[bool, typer.Option("--all-months", help="Generate every month.")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Replace target month snapshots/items.")] = False,
+    backend: Annotated[str, typer.Option("--backend", help="rule, local, or mock.")] = "rule",
+    device: Annotated[str, typer.Option("--device", help="auto, cpu, cuda, or cuda:N.")] = "auto",
+    require_cuda: Annotated[bool, typer.Option("--require-cuda", help="Fail if CUDA cannot be used.")] = False,
+    limit_months: Annotated[int | None, typer.Option("--limit-months", min=1, help="Limit month count.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Do not write timeline tables.")] = False,
+    show_sources: Annotated[bool, typer.Option("--show-sources", help="Show source counts.")] = False,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    if backend == "local":
+        _resolve_cli_device(device, require_cuda, False, "auto")
+    if not month and not all_months:
+        console.print("[red]Specify --month or --all-months.[/red]")
+        raise typer.Exit(code=1)
+    months = [month] if month else None
+    rows = months or [row.month for row in list_timeline_months(db_path=db, order="desc")]
+    if limit_months:
+        rows = rows[:limit_months]
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("generate timeline", total=len(rows))
+        snapshots = generate_timeline_snapshots(
+            months=months,
+            all_months=all_months,
+            limit_months=limit_months,
+            db_path=db,
+            backend=backend,
+            force=force,
+            dry_run=dry_run,
+            progress_callback=lambda done, total, label: _update_progress(progress, task_id, done, total, label),
+        )
+    table = Table(title="Generated Timeline Snapshots" + (" (dry-run)" if dry_run else ""))
+    table.add_column("Month")
+    table.add_column("Title")
+    table.add_column("Items", justify="right")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Importance", justify="right")
+    table.add_column("Warnings")
+    for snapshot in snapshots:
+        warnings = ", ".join(snapshot.quality.get("warnings") or [])
+        table.add_row(
+            snapshot.month,
+            snapshot.title,
+            str(len(snapshot.items)),
+            f"{snapshot.confidence:.2f}",
+            f"{snapshot.importance:.2f}",
+            warnings or "none",
+        )
+        if show_sources:
+            console.print(f"{snapshot.month} sources: {json.dumps(snapshot.source_counts, ensure_ascii=False)}")
+    console.print(table)
+
+
+@app.command("timeline-report")
+def timeline_report_command(
+    year: Annotated[str | None, typer.Option("--year", help="YYYY year.")] = None,
+    all_years: Annotated[bool, typer.Option("--all-years", help="Include all years.")] = False,
+    output: Annotated[Path, typer.Option("--output", help="Markdown output path.")] = Path("data/exports/timelines/timeline.md"),
+    order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "asc",
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    if not year and not all_years:
+        console.print("[red]Specify --year or --all-years.[/red]")
+        raise typer.Exit(code=1)
+    snapshots = list_month_timeline_snapshots(year=None if all_years else year, db_path=db, order=order)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        format_timeline_report(snapshots, title=f"Timeline {year or 'All Years'}", order=order),
+        encoding="utf-8",
+    )
+    console.print(f"[green]Wrote timeline report:[/green] {output}")
+
+
+@app.command("timeline-qa")
+def timeline_qa_command(
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    all_months: Annotated[bool, typer.Option("--all-months", help="Check every month.")] = False,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    if not month and not all_months:
+        console.print("[red]Specify --month or --all-months.[/red]")
+        raise typer.Exit(code=1)
+    rows = timeline_qa(month=month, all_months=all_months, db_path=db)
+    table = Table(title="Timeline QA")
+    table.add_column("Month")
+    table.add_column("Score", justify="right")
+    table.add_column("Warnings")
+    table.add_column("Source counts")
+    table.add_column("Recommended action")
+    for row in rows:
+        table.add_row(
+            row["month"],
+            f"{float(row['quality_score']):.2f}",
+            ", ".join(row["warnings"]) or "none",
+            json.dumps(row["source_counts"], ensure_ascii=False),
+            row["recommended_action"],
+        )
+    console.print(table)
 
 
 @app.command("qa-report")

@@ -560,9 +560,35 @@ python -m notes_lifelog_rag.cli analyze-all --only-missing --dry-run
 python -m notes_lifelog_rag.cli analyze-all --only-missing --limit 10
 python -m notes_lifelog_rag.cli analyze-all --backend local --only-missing --device auto --dtype auto --batch-size 2 --max-new-tokens 512 --show-device
 python -m notes_lifelog_rag.cli search "研究"
+python -m notes_lifelog_rag.cli timeline-months
+python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule
 python -m notes_lifelog_rag.cli timeline --month 2026-05
+python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
+python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
+python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
+python -m notes_lifelog_rag.cli timeline-qa --month 2026-05
 python -m notes_lifelog_rag.cli reflections --month 2026-05
 python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
+        </section>
+
+        <section id="timeline">
+          <h2>強化Timeline</h2>
+          <p>
+            Timeline は単なる event 一覧ではなく、月ごとの記憶カードとして
+            thoughts、events、note_summaries、categories、suggestions、monthly_reflections を統合します。
+            各月カードには「この月の概要」「この月に考えていたこと」「この月に起きたこと」
+            「重要テーマ」「重要な変化」「見返す価値」「根拠」が含まれます。
+          </p>
+          <p>
+            <code>monthly_timeline_snapshots</code> と <code>monthly_timeline_items</code> に保存され、
+            <code>--dry-run</code> ではDBを書き換えずプレビューできます。
+            <code>fallback_heavy</code> warning は、thoughts/events が少なく note summary や title fallback に寄っている状態を示します。
+            その場合は <code>analyze-all</code> 後に <code>generate-timeline --month YYYY-MM --force</code> で再生成します。
+          </p>
+          <p>
+            GUI の Timeline タブでは Year / Month / Category / Theme / Item type / Sort を選び、
+            月カードをクリックすると右ペインで月詳細、evidence、関連メモを確認できます。
+          </p>
         </section>
 
         <section id="limitations">

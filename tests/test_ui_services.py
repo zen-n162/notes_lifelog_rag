@@ -4,6 +4,7 @@ from notes_lifelog_rag.analysis.service import analyze_all
 from notes_lifelog_rag.db import schema
 from notes_lifelog_rag.ingest.importer import ingest_directory
 from notes_lifelog_rag.timeline.service import TimelineItem
+from notes_lifelog_rag.timeline.service import generate_month_timeline_snapshot
 from notes_lifelog_rag.ui import renderers
 from notes_lifelog_rag.ui import services
 
@@ -136,6 +137,24 @@ def test_review_timeline_and_reflection_cards_are_clickable_and_escape_html() ->
         assert "<img" not in html
         assert 'data-note-choice=' in html
         assert "note-card selected" in html
+
+
+def test_timeline_month_cards_do_not_expose_body_and_detail_has_evidence(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    schema.init_db(db_path)
+    ingest_directory(FIXTURES, db_path)
+    analyze_all(db_path=db_path, limit=2, backend_name="mock")
+    month = services.get_timeline_months(db_path=db_path)[0]["month"]
+    snapshot = generate_month_timeline_snapshot(month, db_path=db_path, dry_run=True)
+
+    cards_html = renderers.render_timeline_month_cards([snapshot], selected_month=month)
+    detail_html = renderers.render_month_timeline_detail(snapshot)
+
+    assert 'data-month-choice=' in cards_html
+    assert "Original Note" not in cards_html
+    assert "body text" not in cards_html
+    assert "Evidence" in detail_html
+    assert snapshot.evidence
 
 
 def test_render_note_detail_handles_missing_outputs() -> None:
