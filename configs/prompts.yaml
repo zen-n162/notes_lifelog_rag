@@ -1,0 +1,10 @@
+defaults:
+  language: Japanese
+  output_format: json
+  rules:
+    - Return JSON only for extraction tasks.
+    - Include evidence for every interpreted item.
+    - Separate fact from inference.
+    - Use cautious wording for unsupported or ambiguous inference.
+    - Lower confidence when evidence is ambiguous.
+

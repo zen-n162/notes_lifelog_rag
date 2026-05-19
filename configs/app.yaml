@@ -1,0 +1,24 @@
+app:
+  name: notes_lifelog_rag
+  default_language: ja
+  ui_host: 127.0.0.1
+  ui_port: 7860
+
+paths:
+  raw_notes: data/raw/apple_notes_export
+  database: data/processed/notes.db
+  interim: data/interim
+  exports: data/exports
+  models_root: /home/zennakamura/MyApplication/models
+
+ingestion:
+  chunk_size_chars: 1200
+  chunk_overlap_chars: 200
+  supported_extensions:
+    - .md
+    - .txt
+    - .html
+    - .htm
+    - .json
+    - .pdf
+

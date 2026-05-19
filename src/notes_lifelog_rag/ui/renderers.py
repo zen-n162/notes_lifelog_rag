@@ -1,0 +1,512 @@
+from __future__ import annotations
+
+from html import escape
+from typing import Any
+
+from notes_lifelog_rag.timeline.service import ReflectionReport, TimelineItem
+
+
+def render_sidebar(state: dict[str, Any], *, active_scope: str = "全ノート") -> str:
+    stats = state.get("stats", {})
+    health = state.get("health", {})
+    categories = state.get("categories", [])
+    months = state.get("months", [])
+    nav_items = [
+        "All Notes",
+        "Today Rediscovery",
+        "Important",
+        "Low Confidence",
+        "Evidence Missing",
+        "Timeline",
+        "Reflections",
+        "Suggestions",
+        "Settings",
+        "DB Stats",
+    ]
+    nav = "".join(
+        f'<div class="sidebar-item {"active" if item == active_scope else ""}">{escape(item)}</div>' for item in nav_items
+    )
+    cat_html = "".join(
+        f'<div class="sidebar-item compact"><span>{escape(row["name"])}</span><b>{int(row["note_count"])}</b></div>'
+        for row in categories[:12]
+    )
+    month_html = "".join(
+        f'<div class="sidebar-item compact"><span>{escape(row["month"])}</span><b>{int(row["note_count"])}</b></div>'
+        for row in months[:12]
+    )
+    status = "".join(
+        f'<span class="status-badge">{escape(label)} {int(stats.get(table, 0))}</span>'
+        for label, table in [
+            ("notes", "notes"),
+            ("summaries", "note_summaries"),
+            ("events", "events"),
+            ("thoughts", "thoughts"),
+            ("embeddings", "chunk_embeddings"),
+        ]
+    )
+    return f"""
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="sidebar-title">Notes LifeLog</div>
+        <div class="sidebar-subtitle">Local memory workspace</div>
+      </div>
+      <div class="sidebar-section">{nav}</div>
+      <div class="sidebar-section"><div class="sidebar-heading">Analysis Health</div>
+        <div class="mini-health">
+          <span>summaries {int(health.get("summaries") or 0)}/{int(health.get("notes") or 0)}</span>
+          <span>events {int(health.get("events") or 0)}</span>
+          <span>thoughts {int(health.get("thoughts") or 0)}</span>
+          <span>{escape(str(health.get("health_status") or "Unknown"))}</span>
+        </div>
+      </div>
+      <div class="sidebar-section"><div class="sidebar-heading">Status</div><div class="status-wrap">{status}</div></div>
+      <div class="sidebar-section"><div class="sidebar-heading">Categories</div>{cat_html or render_empty_state("No categories yet")}</div>
+      <div class="sidebar-section"><div class="sidebar-heading">Months</div>{month_html or render_empty_state("No dated notes yet")}</div>
+    </aside>
+    """
+
+
+def render_note_cards(notes: list[dict[str, Any]], *, selected_note_id: str | None = None) -> str:
+    if not notes:
+        return render_empty_state("条件に合うメモがまだありません。検索条件を変えるか、Import / Analyze を実行してください。")
+    cards = []
+    for note in notes:
+        note_id = str(note["id"])
+        title = note.get("display_title") or note.get("title") or "Untitled"
+        choice = f"{note_id[:12]} · {title}"
+        selected = "selected" if selected_note_id and note_id.startswith(selected_note_id) else ""
+        badges = "".join(f'<span class="note-badge">{escape(cat)}</span>' for cat in note.get("categories", [])[:4])
+        if note.get("important"):
+            badges += '<span class="note-badge important">Important</span>'
+        if note.get("low_confidence"):
+            badges += '<span class="note-badge review">Low confidence</span>'
+        if note.get("evidence_missing"):
+            badges += '<span class="note-badge review">Evidence check</span>'
+        score = ""
+        if note.get("search_score") is not None:
+            score = f'<span class="score-pill">{float(note["search_score"]):.3f} · {escape(str(note.get("search_source") or "search"))}</span>'
+        snippet = note.get("search_snippet") or note.get("one_line_summary") or "分析要約はまだありません。"
+        confidence = note.get("confidence")
+        importance = note.get("importance")
+        cards.append(
+            f"""
+            <article class="note-card {selected}" role="button" tabindex="0"
+              data-note-choice="{escape(choice, quote=True)}"
+              aria-label="Select note {escape(title, quote=True)}">
+              <div class="note-title">{escape(title)}</div>
+              <div class="note-snippet">{escape(snippet)}</div>
+              <div class="note-meta">
+                <span>{escape(note.get("date_label") or "date unknown")}</span>
+                <span>{escape(note.get("source_short") or "")}</span>
+              </div>
+              <div class="note-card-footer">
+                <div class="badge-row">{badges}</div>
+                <div class="metric-row">
+                  {render_confidence_pill(confidence)}
+                  {render_importance_pill(importance)}
+                  <span class="score-pill">events {int(note.get("event_count") or 0)}</span>
+                  <span class="score-pill">thoughts {int(note.get("thought_count") or 0)}</span>
+                  {score}
+                </div>
+              </div>
+            </article>
+            """
+        )
+    return '<section class="note-list">' + "".join(cards) + "</section>"
+
+
+def render_note_detail(detail: dict[str, Any]) -> str:
+    if not detail.get("found"):
+        return render_empty_state(detail.get("message", "メモを選択してください。"))
+    note = detail["note"]
+    summary = detail.get("summary")
+    warnings = "".join(render_warning_banner(_warning_label(warning)) for warning in detail.get("warnings", []))
+    category_badges = "".join(f'<span class="note-badge">{escape(item["name"])}</span>' for item in detail.get("categories", []))
+    body = escape(note.get("body") or "")
+    model_runs = _render_model_runs(detail.get("model_runs") or [])
+    reflection = _render_reflection_card(detail.get("reflection"))
+    return f"""
+    <section class="detail-pane">
+      {warnings}
+      <article class="paper">
+        <div class="paper-kicker">{escape(note.get("source_relative_path") or "")}</div>
+        <h1 class="paper-title">{escape(note.get("title") or "Untitled")}</h1>
+        <div class="note-meta detail-meta">
+          <span>{escape(note.get("note_date") or note.get("modified_at") or note.get("imported_at") or "date unknown")}</span>
+          <span>hash {escape(str(note.get("content_hash") or "")[:12])}</span>
+        </div>
+        {render_summary_card(summary)}
+        <div class="badge-row detail-categories">{category_badges}</div>
+        {render_event_cards(detail.get("events") or [])}
+        {render_thought_cards(detail.get("thoughts") or [])}
+        {reflection}
+        {model_runs}
+        <section class="paper-section">
+          <h2>Original Note</h2>
+          <pre class="paper-body">{body}</pre>
+        </section>
+      </article>
+    </section>
+    """
+
+
+def render_summary_card(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return render_warning_banner("まだsummaryがありません。analyze-allを実行すると右ペインが豊かになります。")
+    points = "".join(f"<li>{escape(str(point))}</li>" for point in (summary.get("important_points") or [])[:5])
+    return f"""
+    <section class="ai-summary-card">
+      <div class="section-title-row">
+        <h2>{escape(summary.get("generated_title") or "AI Summary")}</h2>
+        <div>{render_confidence_pill(summary.get("confidence"))}{render_importance_pill(summary.get("importance"))}</div>
+      </div>
+      <p class="summary-line">{escape(summary.get("one_line_summary") or "")}</p>
+      <p>{escape(summary.get("detailed_summary") or "")}</p>
+      <ul class="important-points">{points}</ul>
+      <p class="revisit">{escape(summary.get("revisit_reason") or "")}</p>
+      {render_evidence_card(summary.get("evidence") or [])}
+    </section>
+    """
+
+
+def render_event_cards(events: list[dict[str, Any]]) -> str:
+    if not events:
+        return render_warning_banner("eventsがまだ少ないため、Timelineはnote title fallbackに寄る可能性があります。")
+    items = []
+    for event in events:
+        items.append(
+            f"""
+            <article class="event-card">
+              <div class="section-title-row">
+                <h3>{escape(event.get("title") or "Event")}</h3>
+                <div>{render_confidence_pill(event.get("confidence"))}{render_importance_pill(event.get("importance"))}</div>
+              </div>
+              <p>{escape(event.get("summary") or "")}</p>
+              <div class="note-meta"><span>{escape(event.get("event_type") or "event")}</span><span>{escape(event.get("date_label") or event.get("event_date") or "date unknown")}</span></div>
+              {render_evidence_card(event.get("evidence") or [])}
+            </article>
+            """
+        )
+    return '<section class="paper-section"><h2>Timeline Cards</h2>' + "".join(items) + "</section>"
+
+
+def render_thought_cards(thoughts: list[dict[str, Any]]) -> str:
+    if not thoughts:
+        return render_warning_banner("thoughtsがまだ少ないため、内省やリフレクションは薄く表示されます。")
+    items = []
+    for thought in thoughts:
+        themes = "".join(f'<span class="note-badge">{escape(str(theme))}</span>' for theme in thought.get("themes", [])[:4])
+        items.append(
+            f"""
+            <article class="thought-card">
+              <div class="section-title-row">
+                <h3>{escape(thought.get("title") or "Thought")}</h3>
+                <div>{render_confidence_pill(thought.get("confidence"))}{render_importance_pill(thought.get("importance"))}</div>
+              </div>
+              <p>{escape(thought.get("summary") or "")}</p>
+              <div class="badge-row">{themes}</div>
+              <p class="revisit">{escape(thought.get("remember_reason") or "")}</p>
+              {render_evidence_card(thought.get("evidence") or [])}
+            </article>
+            """
+        )
+    return '<section class="paper-section"><h2>Reflections In This Note</h2>' + "".join(items) + "</section>"
+
+
+def render_evidence_card(evidence: list[dict[str, Any]] | dict[str, Any] | None) -> str:
+    if evidence is None:
+        return '<div class="evidence-card warning">Evidence is missing.</div>'
+    values = evidence if isinstance(evidence, list) else [evidence]
+    if not values:
+        return '<div class="evidence-card warning">Evidence is missing.</div>'
+    rows = []
+    for item in values[:3]:
+        note_id = escape(str(item.get("note_id") or "")[:12])
+        quote = escape(str(item.get("quote") or "")[:180])
+        rows.append(f'<blockquote><span>{note_id}</span>{quote or "quote missing"}</blockquote>')
+    return '<div class="evidence-card"><div class="evidence-label">Evidence</div>' + "".join(rows) + "</div>"
+
+
+def render_category_badges(categories: list[dict[str, Any]] | list[str]) -> str:
+    badges = []
+    for item in categories:
+        name = item.get("name") if isinstance(item, dict) else str(item)
+        badges.append(f'<span class="note-badge">{escape(str(name))}</span>')
+    return '<div class="badge-row">' + "".join(badges) + "</div>"
+
+
+def render_reflection(reflection: ReflectionReport | dict[str, Any] | None) -> str:
+    if reflection is None:
+        return render_empty_state("Reflectionはまだありません。月を選択して生成してください。")
+    if isinstance(reflection, ReflectionReport):
+        month = reflection.month
+        messages = reflection.reminder_messages
+        evidence = reflection.evidence
+        confidence = reflection.confidence
+        importance = reflection.importance
+        warnings = reflection.quality_warnings
+        coverage = reflection.coverage
+    else:
+        summary = reflection.get("summary") or {}
+        month = reflection.get("month") or summary.get("month") or "unknown"
+        messages = summary.get("reminder_messages") or []
+        evidence = reflection.get("evidence") or summary.get("evidence") or []
+        confidence = reflection.get("confidence") or summary.get("confidence")
+        importance = reflection.get("importance") or summary.get("importance")
+        warnings = summary.get("quality_warnings") or []
+        coverage = summary.get("coverage") or {}
+    message_html = "".join(f"<li>{escape(str(message))}</li>" for message in messages[:5]) or "<li>まだ十分な材料がありません。</li>"
+    warning_html = "".join(render_warning_banner(str(item)) for item in warnings[:3])
+    return f"""
+    <section class="ai-summary-card">
+      <div class="section-title-row">
+        <h2>{escape(str(month))} Reflection</h2>
+        <div>{render_confidence_pill(confidence)}{render_importance_pill(importance)}</div>
+      </div>
+      <div class="note-meta"><span>notes {int(coverage.get("notes") or 0)}</span><span>events {int(coverage.get("event_notes") or 0)}</span><span>thoughts {int(coverage.get("thought_notes") or 0)}</span></div>
+      {warning_html}
+      <ul class="important-points">{message_html}</ul>
+      {render_evidence_card(evidence)}
+    </section>
+    """
+
+
+def render_reflection_list(reflections: list[dict[str, Any]]) -> str:
+    if not reflections:
+        return render_empty_state("Monthly reflections are not generated yet.")
+    cards = []
+    for item in reflections[:24]:
+        summary = item.get("summary") or {}
+        messages = summary.get("reminder_messages") or []
+        preview = messages[0] if messages else "Reflection summary is available."
+        cards.append(
+            f"""
+            <article class="thought-card">
+              <div class="section-title-row">
+                <h3>{escape(item.get("month") or "unknown")} Reflection</h3>
+                <div>{render_confidence_pill(item.get("confidence"))}{render_importance_pill(item.get("importance"))}</div>
+              </div>
+              <p>{escape(str(preview))}</p>
+              <div class="note-meta"><span>updated {escape(item.get("updated_at") or "")}</span></div>
+              {render_evidence_card(item.get("evidence") or [])}
+            </article>
+            """
+        )
+    return '<section class="timeline-cards">' + "".join(cards) + "</section>"
+
+
+def render_suggestions(suggestions: list[dict[str, Any]], *, selected_note_id: str | None = None) -> str:
+    if not suggestions:
+        return render_empty_state("Suggestions are not generated yet. Run generate-suggestions.")
+    cards = []
+    for item in suggestions:
+        note_id = str(item.get("note_id") or "")
+        title = str(item.get("title") or "Suggestion")
+        choice = f"{note_id[:12]} · {title}" if note_id else ""
+        selected = "selected" if selected_note_id and note_id.startswith(selected_note_id) else ""
+        click_attrs = (
+            f' role="button" tabindex="0" data-note-choice="{escape(choice, quote=True)}"'
+            f' aria-label="Select suggestion source {escape(title, quote=True)}"'
+            if note_id
+            else ""
+        )
+        cards.append(
+            f"""
+            <article class="note-card suggestion-card {selected}"{click_attrs}>
+              <div class="section-title-row">
+                <h3>{escape(title)}</h3>
+                <div>{render_importance_pill(item.get("importance"))}{render_confidence_pill(item.get("confidence"))}</div>
+              </div>
+              <div class="badge-row"><span class="note-badge important">{escape(item.get("suggestion_type") or "suggestion")}</span><span class="note-badge">{escape(item.get("status") or "new")}</span></div>
+              <p>{escape(item.get("message") or "")}</p>
+              <div class="note-meta"><span>{escape(item.get("target_date") or "")}</span><span>{escape(item.get("source_relative_path") or item.get("note_title") or "")}</span><span>{escape(str(item.get("note_id") or "")[:12])}</span></div>
+              {render_evidence_card(item.get("evidence") or [])}
+            </article>
+            """
+        )
+    return '<section class="timeline-cards">' + "".join(cards) + "</section>"
+
+
+def render_quality_warnings(warnings: list[dict[str, Any]]) -> str:
+    if not warnings:
+        return render_empty_state("QA warnings are clear for the current filter.")
+    rows = []
+    for item in warnings:
+        rows.append(
+            f"""
+            <article class="event-card">
+              <div class="section-title-row">
+                <h3>{escape(item.get("warning_type") or "warning")} · {escape(item.get("title") or "")}</h3>
+                <div>{render_confidence_pill(item.get("confidence"))}{render_importance_pill(item.get("importance"))}</div>
+              </div>
+              <p>{escape(item.get("issue") or "")}</p>
+              <div class="note-meta"><span>{escape(str(item.get("note_id") or "")[:12])}</span><span>{escape(item.get("source_path") or "")}</span></div>
+              {render_evidence_card(item.get("evidence") or [])}
+            </article>
+            """
+        )
+    return '<section class="timeline-cards">' + "".join(rows) + "</section>"
+
+
+def render_model_status_badges(statuses: list[dict[str, Any]]) -> str:
+    badges = []
+    for status in statuses[:8]:
+        enabled = "ok" if status.get("enabled") else "warn"
+        badges.append(
+            f'<span class="status-badge {enabled}">{escape(status.get("purpose", ""))}: {escape(status.get("runtime_status", ""))} / {escape(status.get("cuda_status", ""))}</span>'
+        )
+    return '<div class="status-wrap">' + "".join(badges) + "</div>"
+
+
+def render_model_status(statuses: list[dict[str, Any]]) -> str:
+    rows = []
+    for status in statuses:
+        rows.append(
+            f"<tr><td>{escape(status.get('purpose', ''))}</td><td>{escape(status.get('name', ''))}</td>"
+            f"<td>{escape(status.get('runtime_status', ''))}</td><td>{escape(status.get('cuda_status', ''))}</td>"
+            f"<td>{'yes' if status.get('enabled') else 'disabled'}</td><td>{escape(status.get('reason', ''))}</td></tr>"
+        )
+    return '<table class="model-run-table"><tbody>' + "".join(rows) + "</tbody></table>"
+
+
+def render_cuda_status(cuda: dict[str, Any]) -> str:
+    gpu = cuda.get("gpus", [{}])[0] if cuda.get("gpus") else {}
+    return f"""
+    <section class="analysis-health">
+      <div class="section-title-row"><h2>CUDA</h2><span class="status-badge {'ok' if cuda.get('cuda_available') else 'warn'}">{'available' if cuda.get('cuda_available') else 'unavailable'}</span></div>
+      <div class="note-meta">
+        <span>torch {escape(str(cuda.get("torch_version") or "-"))}</span>
+        <span>cuda {escape(str(cuda.get("torch_cuda_version") or "-"))}</span>
+        <span>gpu {escape(str(gpu.get("name") or "-"))}</span>
+        <span>{escape(str(cuda.get("likely_reason") or ""))}</span>
+      </div>
+    </section>
+    """
+
+
+def render_db_stats_badges(stats: dict[str, int]) -> str:
+    keys = [
+        ("Notes", "notes"),
+        ("Summaries", "note_summaries"),
+        ("Events", "events"),
+        ("Thoughts", "thoughts"),
+        ("Embeddings", "chunk_embeddings"),
+        ("Failures", "model_runs"),
+    ]
+    return '<div class="status-wrap">' + "".join(
+        f'<span class="status-badge">{escape(label)} {int(stats.get(key, 0))}</span>' for label, key in keys
+    ) + "</div>"
+
+
+def render_analysis_health(health: dict[str, Any]) -> str:
+    notes = max(int(health.get("notes") or 0), 1)
+    status = str(health.get("health_status") or "Unknown")
+    sparse = status in {"Sparse", "Needs Review", "Running Job"}
+    message = "; ".join(health.get("warnings") or []) or ("Analysis coverage looks usable." if not sparse else "Analysis needs review.")
+    rows = [
+        ("Summaries", health.get("summaries", 0), notes),
+        ("Category notes", health.get("unique_category_notes", 0), notes),
+        ("Event notes", health.get("unique_event_notes", 0), notes),
+        ("Thought notes", health.get("unique_thought_notes", 0), notes),
+        ("Embedding chunks", health.get("embedding_chunks", 0), max(int(health.get("chunks") or 0), 1)),
+    ]
+    meters = "".join(_meter(label, int(value), int(total)) for label, value, total in rows)
+    return f"""
+    <section class="analysis-health">
+      <div class="section-title-row"><h2>Analysis Health</h2><span class="status-badge {'warn' if sparse else 'ok'}">{escape(status)}</span></div>
+      <div class="health-grid">{meters}</div>
+      <div class="note-meta">
+        <span>suggestions {int(health.get("suggestions") or 0)}</span>
+        <span>reflections {int(health.get("monthly_reflections") or 0)}</span>
+        <span>model failures {int(health.get("model_runs_failures") or 0)}</span>
+        <span>import errors {int(health.get("import_errors") or 0)}</span>
+        <span>low confidence {int(health.get("low_confidence_items") or 0)}</span>
+        <span>evidence warnings {int(health.get("evidence_warnings") or 0)}</span>
+      </div>
+      <p class="muted">{escape(message)}</p>
+    </section>
+    """
+
+
+def render_empty_state(message: str) -> str:
+    return f'<div class="empty-state">{escape(message)}</div>'
+
+
+def render_warning_banner(message: str) -> str:
+    return f'<div class="warning-banner">{escape(message)}</div>'
+
+
+def render_confidence_pill(value: Any) -> str:
+    if value is None:
+        return '<span class="confidence-pill muted">conf -</span>'
+    number = float(value)
+    tone = "low" if number <= 0.45 else "ok"
+    return f'<span class="confidence-pill {tone}">conf {number:.2f}</span>'
+
+
+def render_importance_pill(value: Any) -> str:
+    if value is None:
+        return '<span class="importance-pill muted">imp -</span>'
+    number = float(value)
+    tone = "high" if number >= 0.75 else "ok"
+    return f'<span class="importance-pill {tone}">imp {number:.2f}</span>'
+
+
+def render_timeline_cards(items: list[TimelineItem]) -> str:
+    if not items:
+        return render_empty_state("この月のtimeline候補はまだありません。")
+    cards = []
+    for item in items:
+        cards.append(
+            f"""
+            <article class="event-card">
+              <div class="section-title-row">
+                <h3>{escape(item.date_label)} · {escape(item.title)}</h3>
+                <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
+              </div>
+              <p>{escape(item.summary)}</p>
+              <div class="note-meta"><span>{escape(item.item_type)}</span><span>{escape(item.source_title)}</span><span>{escape(item.note_id[:12])}</span></div>
+              {render_evidence_card(item.evidence)}
+            </article>
+            """
+        )
+    return '<section class="timeline-cards">' + "".join(cards) + "</section>"
+
+
+def _render_reflection_card(reflection: dict[str, Any] | None) -> str:
+    if not reflection:
+        return ""
+    return '<section class="paper-section"><h2>Related Monthly Reflection</h2>' + render_reflection(reflection) + "</section>"
+
+
+def _render_model_runs(model_runs: list[dict[str, Any]]) -> str:
+    if not model_runs:
+        return render_warning_banner("current prompt/versionのmodel run情報はまだありません。")
+    rows = []
+    for row in model_runs[:8]:
+        status = "success" if row.get("success") else "failed"
+        rows.append(
+            f"<tr><td>{escape(str(row.get('task_name') or ''))}</td><td>{escape(status)}</td>"
+            f"<td>{escape(str(row.get('model_name') or ''))}</td><td>{escape(str(row.get('prompt_version') or ''))}</td></tr>"
+        )
+    return '<section class="paper-section"><h2>Model Runs</h2><table class="model-run-table"><tbody>' + "".join(rows) + "</tbody></table></section>"
+
+
+def _meter(label: str, value: int, total: int) -> str:
+    pct = 0 if total <= 0 else min(100, int(value / total * 100))
+    return f"""
+    <div class="health-meter">
+      <div class="note-meta"><span>{escape(label)}</span><span>{value}/{total}</span></div>
+      <div class="meter-track"><div class="meter-fill" style="width:{pct}%"></div></div>
+    </div>
+    """
+
+
+def _warning_label(value: str) -> str:
+    return {
+        "summary_missing": "summaryが未生成です。",
+        "events_sparse": "eventsが少ないため、timelineは弱くなる可能性があります。",
+        "thoughts_sparse": "thoughtsが少ないため、reflectionは弱くなる可能性があります。",
+        "low_confidence": "低confidenceのAI出力があります。原文確認を推奨します。",
+        "evidence_missing": "evidenceが弱い、または不足しているAI出力があります。",
+    }.get(value, value)

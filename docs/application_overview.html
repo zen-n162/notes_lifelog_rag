@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>notes_lifelog_rag Application Overview</title>
+  <style>
+    :root {
+      --ink: #1d1d1f;
+      --muted: #68686d;
+      --line: #e6dfcf;
+      --paper: #fffdf7;
+      --wash: #f7f2e7;
+      --yellow: #ffd45a;
+      --yellow-dark: #c69213;
+      --green: #2f7d4f;
+      --blue: #2b62a8;
+      --red: #aa3d35;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: linear-gradient(180deg, #fbf8ef 0%, #f0ebe0 100%);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Noto Sans JP", sans-serif;
+      line-height: 1.65;
+    }
+    .shell {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 20px 64px;
+    }
+    header {
+      padding: 34px 32px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fff5c7 0%, var(--paper) 64%);
+      box-shadow: 0 20px 60px rgba(90, 70, 30, 0.12);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(30px, 5vw, 54px);
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 25px;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 0 0 14px;
+    }
+    .lead {
+      max-width: 760px;
+      color: #3b3b40;
+      font-size: 18px;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      color: #343437;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 22px;
+      margin-top: 24px;
+      align-items: start;
+    }
+    nav {
+      position: sticky;
+      top: 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 253, 247, 0.86);
+      padding: 14px;
+    }
+    nav a {
+      display: block;
+      padding: 9px 10px;
+      color: var(--ink);
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    nav a:hover {
+      background: #fff3c4;
+    }
+    section {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--paper);
+      padding: 26px;
+      margin-bottom: 18px;
+      box-shadow: 0 10px 28px rgba(60, 46, 20, 0.06);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffaf0;
+      padding: 16px;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .step {
+      border-left: 4px solid var(--yellow);
+      background: #fffaf0;
+      padding: 12px;
+      border-radius: 8px;
+      min-height: 118px;
+    }
+    .step strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: #f0eadb;
+      color: #3f3a30;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #f0eadb;
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #27241f;
+      color: #fff8df;
+      line-height: 1.5;
+    }
+    ul {
+      padding-left: 22px;
+      margin-top: 6px;
+    }
+    .note {
+      border-left: 4px solid var(--green);
+      background: #eef8f1;
+      padding: 14px 16px;
+      border-radius: 8px;
+    }
+    .warning {
+      border-left: 4px solid var(--red);
+      background: #fff1ef;
+      padding: 14px 16px;
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #fff3c4;
+      font-size: 13px;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    footer {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 18px 4px 0;
+    }
+    @media (max-width: 900px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+      nav {
+        position: static;
+      }
+      .grid, .flow {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <h1>notes_lifelog_rag</h1>
+      <p class="lead">
+        Apple Notes / iPhone Notes のエクスポートを、完全ローカルで検索・整理・振り返りできる
+        個人用ライフログ RAG アプリケーションです。単なる要約ではなく、出来事、考え、判断、
+        もう一度見返す価値のある記憶を、元メモの根拠と一緒に取り出します。
+      </p>
+      <div class="meta">
+        <span class="pill">Local-first</span>
+        <span class="pill">SQLite + FTS5</span>
+        <span class="pill">Embeddings + Reranker</span>
+        <span class="pill">Evidence-aware AI outputs</span>
+        <span class="pill">Gradio UI: 127.0.0.1:7860</span>
+      </div>
+    </header>
+
+    <main>
+      <nav aria-label="Page sections">
+        <a href="#purpose">目的</a>
+        <a href="#privacy">プライバシー設計</a>
+        <a href="#workflow">処理の流れ</a>
+        <a href="#features">主要機能</a>
+        <a href="#ui">Gradio UI</a>
+        <a href="#models">ローカルモデル</a>
+        <a href="#cuda">CUDA実行</a>
+        <a href="#data">データとDB</a>
+        <a href="#resume">差分実行</a>
+        <a href="#commands">よく使うコマンド</a>
+        <a href="#limitations">現在の制限</a>
+      </nav>
+
+      <div>
+        <section id="purpose">
+          <h2>目的</h2>
+          <p>
+            このアプリケーションは、ユーザーが Apple Notes からエクスポートしたメモを取り込み、
+            あとから「いつ何があったか」「その時何を考えていたか」「今なぜ見返す価値があるか」
+            を探しやすくするためのローカル専用メモ記憶アシスタントです。
+          </p>
+          <div class="note">
+            AI が生成する出力は、必ず元メモへの <code>evidence</code>、推定の確からしさを示す
+            <code>confidence</code>、見返す価値の強さを示す <code>importance</code> と一緒に扱います。
+            根拠が弱いものは断定せず、推測として読める形にします。
+          </div>
+        </section>
+
+        <section id="privacy">
+          <h2>プライバシー設計</h2>
+          <div class="grid">
+            <div class="card">
+              <h3>外部APIを使わない</h3>
+              <p>
+                OpenAI API、Gemini API、Claude API、クラウド embedding、クラウド vector DB などへ
+                メモ本文や分析結果を送信しません。
+              </p>
+            </div>
+            <div class="card">
+              <h3>Apple IDを扱わない</h3>
+              <p>
+                iCloud.com のスクレイピングや Apple ID 認証情報の保存は行いません。
+                入力はユーザーが明示的にエクスポートしたファイルです。
+              </p>
+            </div>
+            <div class="card">
+              <h3>ローカルUI</h3>
+              <p>
+                UI のデフォルトホストは <code>127.0.0.1</code>、ポートは <code>7860</code> です。
+                外部公開を前提にしていません。
+              </p>
+            </div>
+            <div class="card">
+              <h3>本文表示は明示操作</h3>
+              <p>
+                一覧や検索結果では短い snippet を中心に表示し、元メモ本文はユーザーが詳細を開いた時に確認します。
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section id="workflow">
+          <h2>処理の流れ</h2>
+          <div class="flow">
+            <div class="step">
+              <strong>1. Import</strong>
+              <span class="tag">Phase 1-2</span>
+              <p>Markdown、TXT、HTML、JSON、PDF を読み、SQLite に保存します。</p>
+            </div>
+            <div class="step">
+              <strong>2. Search</strong>
+              <span class="tag">Phase 2-3</span>
+              <p>FTS5 / LIKE / embedding / reranker を組み合わせて候補を返します。</p>
+            </div>
+            <div class="step">
+              <strong>3. Analysis</strong>
+              <span class="tag">Phase 4</span>
+              <p>summary、category、event、thought を evidence 付きで構造化します。</p>
+            </div>
+            <div class="step">
+              <strong>4. Reflection</strong>
+              <span class="tag">Phase 5-6</span>
+              <p>月別 timeline と reflection を作り、UI で元メモまで確認できます。</p>
+            </div>
+            <div class="step">
+              <strong>5. Rediscovery</strong>
+              <span class="tag">Phase 7</span>
+              <p>QA Review、Analysis Health、Suggestions で見返す価値のある過去を再発見します。</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="features">
+          <h2>主要機能</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>機能</th>
+                <th>説明</th>
+                <th>主な保存先</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Ingestion</td>
+                <td>エクスポート済み Apple Notes ファイルを取り込み、重複は content hash で避けます。</td>
+                <td><code>notes</code>, <code>note_chunks</code></td>
+              </tr>
+              <tr>
+                <td>Hybrid Search</td>
+                <td>キーワード検索、semantic embedding、reranking を組み合わせます。</td>
+                <td><code>notes_fts</code>, <code>chunk_embeddings</code></td>
+              </tr>
+              <tr>
+                <td>Summaries</td>
+                <td>タイトル、1行要約、詳細要約、重要ポイント、見返す理由を生成します。</td>
+                <td><code>note_summaries</code></td>
+              </tr>
+              <tr>
+                <td>Categories</td>
+                <td>研究、修論、就活、生活、感情・内省などのカテゴリを複数付与できます。</td>
+                <td><code>categories</code>, <code>note_categories</code></td>
+              </tr>
+              <tr>
+                <td>Events / Thoughts</td>
+                <td>出来事、予定、判断、気づき、価値観、不安、目標などを抽出します。</td>
+                <td><code>events</code>, <code>thoughts</code></td>
+              </tr>
+              <tr>
+                <td>Timeline / Reflections</td>
+                <td>thoughts、events、summaries を優先して月別の出来事と考えを振り返り、coverage warningも表示します。</td>
+                <td><code>monthly_reflections</code></td>
+              </tr>
+              <tr>
+                <td>Suggestions / QA Review</td>
+                <td>重要な思考・出来事、見返す理由、低confidence、evidence不足をもとに再発見候補とレビュー候補を作ります。</td>
+                <td><code>suggestions</code>, <code>model_runs</code>, <code>import_errors</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="ui">
+          <h2>Gradio UI</h2>
+          <p>
+            UI は Apple HIG に近い落ち着いたダークモードの Notes-like デザインですが、
+            Apple Notes そのものではなく、Apple ロゴ、Apple Notes 商標、Apple 純正アイコンは使いません。
+            温かいチャコール背景、淡い黄色のアクセント、dark paper card、
+            3ペイン構成で、デフォルトでは <code>127.0.0.1:7860</code> で起動します。
+          </p>
+          <div class="grid">
+            <div class="card"><h3>Notes Workspace</h3><p>左の記憶領域、中央のnote cards、右のpaper previewでメモを読み返します。</p></div>
+            <div class="card"><h3>Sidebar</h3><p>左ペイン上部で Library、Category、Month を選択し、その下で All Notes、Today Rediscovery、Important、Low Confidence、Evidence Missing、Analysis Healthを確認。</p></div>
+            <div class="card"><h3>Note List</h3><p>generated title、summary、category badges、confidence / importance、events/thoughts count、review badgeを表示。</p></div>
+            <div class="card"><h3>Detail Pane</h3><p>summary、important points、events、thoughts、evidence quotes、元メモ本文を紙面風に表示。</p></div>
+            <div class="card"><h3>Analysis Jobs</h3><p>embedding/analyze-all の dry-run と実行を明示ボタンで起動。heavy job は自動実行しません。</p></div>
+            <div class="card"><h3>QA / Suggestions / Settings</h3><p>低confidence、evidence不足、model failure、CUDA/model状態、Suggestions、Analysis Healthを確認。</p></div>
+          </div>
+          <p>
+            一覧では個人メモ本文を大量表示せず、詳細ペインで選択したメモだけ原文を確認できます。
+            Search / Filter 後は中央のnote card自体をクリックすると選択でき、
+            選択カードのハイライトと右ペイン詳細が同期します。
+            Library と filter の選択状態は黄色の塗り潰しインジケータと淡い背景で分かるようにしています。
+            Phase 7 では QA Review、Timeline、Reflections、Suggestions の専用タブを追加し、
+            running analyze-all がある場合は UI の heavy job 実行を警告で止めます。
+            Workspaceで Suggestions を選んだ場合、中央に suggestion cards を表示し、
+            クリックした候補の根拠メモ本文を右ペインで確認できます。
+            Ask は検索 evidence に基づく控えめな回答を表示し、根拠ノートカードから詳細へ戻れます。
+          </p>
+        </section>
+
+        <section id="models">
+          <h2>ローカルモデル</h2>
+          <p>
+            モデル設定は <code>configs/models.yaml</code> にあり、既存モデルパスがある場合だけ有効化します。
+            パスがない場合、または runtime dependency がない場合は disabled として扱い、関係ない機能は落としません。
+          </p>
+          <ul>
+            <li>Text generation: Qwen3-Swallow-8B, Qwen3-4B-Instruct</li>
+            <li>Embedding: Qwen3-Embedding-0.6B, ruri-v3-310m</li>
+            <li>Reranker: Qwen3-Reranker-0.6B, ruri-v3-reranker-310m</li>
+            <li>Tests: heavy model をロードしない mock backend を使用</li>
+          </ul>
+          <div class="warning">
+            モデルファイルは自動ダウンロードしません。<code>hf download</code>、
+            <code>huggingface-cli download</code>、モデル取得目的の <code>wget</code> / <code>curl</code> は、
+            ユーザーが明示した場合を除き実行しません。
+          </div>
+        </section>
+
+        <section id="cuda">
+          <h2>CUDA実行とCPU fallback</h2>
+          <p>
+            <code>build-embeddings</code>、<code>search</code>、<code>ask</code>、analysis 系 CLI は
+            <code>--device auto</code> を受け取り、CUDA が利用可能なら GPU、利用不可なら理由を表示して
+            CPU fallback します。CUDA を必須にしたい場合は <code>--require-cuda</code> または
+            <code>--no-cpu-fallback</code> を使います。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>確認 / 実行</th>
+                <th>コマンド</th>
+                <th>目的</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>CUDA診断</td>
+                <td><code>python -m notes_lifelog_rag.cli cuda-status</code></td>
+                <td>PyTorch CUDA build、driver、nvidia-smi、推定原因、推奨アクションを確認。</td>
+              </tr>
+              <tr>
+                <td>Embedding</td>
+                <td><code>build-embeddings --backend local --only-missing --device auto --show-device</code></td>
+                <td>GPUが使えればCUDA、使えなければCPUで差分embedding。</td>
+              </tr>
+              <tr>
+                <td>Analysis</td>
+                <td><code>analyze-all --backend local --only-missing --device auto --dtype auto --max-new-tokens 512</code></td>
+                <td>model_runs cache と per-note commit を維持しながらローカルLLM実行。</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="warning">
+            NVIDIA driver が古い場合、アプリ側では根本解決できません。PyTorch CUDA build と driver の整合を取るか、
+            CPU fallback で続行してください。GPU OOM 時は <code>--batch-size</code> と
+            <code>--max-new-tokens</code> を下げ、<code>--limit</code> で分割実行します。
+          </div>
+        </section>
+
+        <section id="data">
+          <h2>データとDB</h2>
+          <p>
+            取り込んだメモ、chunk、embedding、分析出力はローカル SQLite DB に保存します。
+            生成データは <code>data/processed/notes.db</code> を中心に管理し、raw export や DB は
+            Git 管理対象にしません。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>領域</th>
+                <th>パス / テーブル</th>
+                <th>役割</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Raw input</td>
+                <td><code>data/raw/apple_notes_export/</code></td>
+                <td>ユーザーがエクスポートしたメモファイル置き場。</td>
+              </tr>
+              <tr>
+                <td>Database</td>
+                <td><code>data/processed/notes.db</code></td>
+                <td>notes, chunks, summaries, events, thoughts, model_runs などを保存。</td>
+              </tr>
+              <tr>
+                <td>Configs</td>
+                <td><code>configs/app.yaml</code>, <code>configs/models.yaml</code></td>
+                <td>アプリ設定、モデルパス、カテゴリ、プロンプト方針。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="resume">
+          <h2>差分更新と再開安全性</h2>
+          <p>
+            877件規模のメモでも安全に少しずつ処理できるように、embedding build と analysis 系 CLI は
+            <code>--only-missing</code> をデフォルトにしています。既存結果を確認して未処理分だけを選び、
+            progress bar を表示しながら batch / note 単位で commit します。
+            analysis 系 CLI の <code>--limit</code> は未指定なら全件候補を対象にし、少量テストしたい時だけ
+            <code>--limit 10</code> のように指定します。<code>--dry-run</code> は完全に読み取り専用で、
+            DB 行は追加・更新しません。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>対象</th>
+                <th>skip 判定</th>
+                <th>再実行回避</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Embeddings</td>
+                <td><code>chunk_embeddings</code> に同一 model / text hash の成功行があれば skip。</td>
+                <td><code>--dry-run</code> で予定数確認、<code>--force</code> で意図的に再構築。</td>
+              </tr>
+              <tr>
+                <td>Summaries / Categories</td>
+                <td>task / model / note id / content hash / prompt version が一致する成功 cache と保存済み行を skip。</td>
+                <td><code>model_runs</code> の成功 JSON があれば LLM を再実行せず保存結果を復元。本文更新で content hash が変わると再分析対象。</td>
+              </tr>
+              <tr>
+                <td>Events / Thoughts</td>
+                <td>同じ hash の成功 cache と保存済み行を skip。保存行がなくても空抽出成功 cache は処理済み。</td>
+                <td>途中停止後も未保存 note だけを選び、成功済み cache を優先して使う。<code>{"events":[]}</code> / <code>{"thoughts":[]}</code> は空抽出として記録。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="commands">
+          <h2>よく使うコマンド</h2>
+          <pre><code>conda activate notes_lifelog_rag
+python -m notes_lifelog_rag.cli init-db
+python -m notes_lifelog_rag.cli ingest-notes --input data/raw/apple_notes_export
+python -m notes_lifelog_rag.cli cuda-status
+python -m notes_lifelog_rag.cli build-embeddings --backend local --only-missing --device auto --batch-size 16 --show-device
+python -m notes_lifelog_rag.cli build-embeddings --dry-run --limit 100
+python -m notes_lifelog_rag.cli analyze-all --only-missing --dry-run
+python -m notes_lifelog_rag.cli analyze-all --only-missing --limit 10
+python -m notes_lifelog_rag.cli analyze-all --backend local --only-missing --device auto --dtype auto --batch-size 2 --max-new-tokens 512 --show-device
+python -m notes_lifelog_rag.cli search "研究"
+python -m notes_lifelog_rag.cli timeline --month 2026-05
+python -m notes_lifelog_rag.cli reflections --month 2026-05
+python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
+        </section>
+
+        <section id="limitations">
+          <h2>現在の制限と今後の改善</h2>
+          <ul>
+            <li>UI の Ask は現時点では検索 evidence を使う軽量回答で、長文 LLM RAG 生成は今後の拡張対象です。</li>
+            <li>PDF は抽出可能なテキストのみ対象で、画像PDFのOCRはまだ通常メモ分析には組み込んでいません。</li>
+            <li>月次 reflection は保存済み analysis output をもとに組み立てるため、先に <code>analyze-all</code> を実行すると内容が豊かになります。</li>
+            <li>重いローカル LLM の実行は環境依存です。mock backend はテストと安全な開発用に残しています。</li>
+          </ul>
+        </section>
+
+        <footer>
+          This page is a public-safe application explanation. It intentionally contains no private note contents.
+          Update this file whenever the application behavior, UI, CLI, model configuration, or privacy policy changes.
+        </footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,8 @@
+name: notes_lifelog_rag
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -e .[dev,models,ui]

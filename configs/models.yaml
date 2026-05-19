@@ -1,0 +1,31 @@
+defaults:
+  text_generation: Qwen3-4B-Instruct-2507
+  embedding: ruri-v3-310m
+  reranker: ruri-v3-reranker-310m
+
+models:
+  text_generation:
+    - name: Qwen3-Swallow-8B-RL-v0.2
+      path: /home/zennakamura/MyApplication/models/qwen/Qwen3-Swallow-8B-RL-v0.2
+    - name: Qwen3-4B-Instruct-2507
+      path: /home/zennakamura/MyApplication/models/qwen/Qwen3-4B-Instruct-2507
+  embedding:
+    - name: Qwen3-Embedding-0.6B
+      path: /home/zennakamura/MyApplication/models/qwen/Qwen3-Embedding-0.6B
+    - name: ruri-v3-310m
+      path: /home/zennakamura/MyApplication/models/embedding/ruri-v3-310m
+  reranker:
+    - name: Qwen3-Reranker-0.6B
+      path: /home/zennakamura/MyApplication/models/qwen/Qwen3-Reranker-0.6B
+    - name: ruri-v3-reranker-310m
+      path: /home/zennakamura/MyApplication/models/reranker/ruri-v3-reranker-310m
+  asr:
+    - name: faster-whisper-large-v3
+      path: /home/zennakamura/MyApplication/models/whisper/faster-whisper-large-v3
+  vision_ocr:
+    - name: Florence-2-large
+      path: /home/zennakamura/MyApplication/models/florence/Florence-2-large
+    - name: PaddleOCR-VL
+      path: /home/zennakamura/MyApplication/models/paddleocr/PaddleOCR-VL
+    - name: Qwen3-VL-8B-Thinking
+      path: /home/zennakamura/MyApplication/models/qwen/Qwen3-VL-8B-Thinking
