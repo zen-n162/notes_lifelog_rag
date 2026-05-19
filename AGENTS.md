@@ -787,6 +787,12 @@ https://github.com/zen-n162/notes_lifelog_rag.git
 ```
 
 Use this as the `origin` remote unless the user explicitly asks for a different remote.
+If noninteractive HTTPS authentication is unavailable, keep the same GitHub
+repository and use the equivalent SSH push URL:
+
+```text
+git@github.com:zen-n162/notes_lifelog_rag.git
+```
 
 After making any repository change, update Git before reporting completion:
 
