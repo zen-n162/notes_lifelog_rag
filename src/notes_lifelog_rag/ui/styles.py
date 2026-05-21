@@ -337,6 +337,17 @@ APP_CSS = """
   background: var(--notes-card-2);
 }
 
+.month-item-card.low-priority {
+  opacity: .82;
+  border-style: dashed;
+  background: rgba(86, 74, 56, .30);
+}
+
+.month-item-card.low-priority .note-badge {
+  background: rgba(255, 198, 92, .12);
+  color: #d2bb88;
+}
+
 .section-title-row {
   display: flex;
   justify-content: space-between;

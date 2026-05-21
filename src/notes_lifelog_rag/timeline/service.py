@@ -117,6 +117,20 @@ class MonthTimelineSnapshot:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class TimelineBuildLimits:
+    max_thoughts: int = 10
+    max_events: int = 10
+    max_summaries: int = 10
+    max_suggestions: int = 5
+    max_fallback: int = 3
+
+
+DEFAULT_TIMELINE_LIMITS = TimelineBuildLimits()
+UNKNOWN_MONTHS = {"1900-01", "0000-00", "unknown"}
+LOW_PRIORITY_TAG = "low_priority"
+
+
 def build_timeline(month: str | None = None, *, db_path: str | Path | None = None, limit: int = 100) -> list[TimelineItem]:
     init_db(db_path)
     selected_month = _normalize_month(month)
@@ -295,41 +309,17 @@ def list_timeline_months(
     *,
     db_path: str | Path | None = None,
     order: str = "desc",
+    include_unknown: bool = False,
 ) -> list[TimelineMonthSummary]:
     init_db(db_path)
     with connect(db_path) as conn:
-        rows = conn.execute(
-            """
-            WITH months AS (
-                SELECT SUBSTR(COALESCE(note_date, modified_at, created_at, imported_at), 1, 7) AS month
-                FROM notes
-                WHERE LENGTH(COALESCE(note_date, modified_at, created_at, imported_at, '')) >= 7
-                UNION
-                SELECT SUBSTR(COALESCE(event_date, date_label), 1, 7) AS month
-                FROM events
-                WHERE LENGTH(COALESCE(event_date, date_label, '')) >= 7
-                UNION
-                SELECT SUBSTR(COALESCE(thoughts.date_label, notes.note_date, notes.modified_at, notes.imported_at), 1, 7) AS month
-                FROM thoughts
-                JOIN notes ON notes.id = thoughts.note_id
-                WHERE LENGTH(COALESCE(thoughts.date_label, notes.note_date, notes.modified_at, notes.imported_at, '')) >= 7
-                UNION
-                SELECT SUBSTR(target_date, 1, 7) AS month
-                FROM suggestions
-                WHERE LENGTH(COALESCE(target_date, '')) >= 7
-                UNION
-                SELECT month FROM monthly_reflections
-                UNION
-                SELECT month FROM monthly_timeline_snapshots
-            )
-            SELECT month
-            FROM months
-            WHERE month IS NOT NULL AND month != ''
-            GROUP BY month
-            """
-        ).fetchall()
         months = sorted(
-            {month for row in rows if (month := _normalize_month_key(row["month"]))},
+            {
+                month
+                for month in _timeline_month_values(conn)
+                if month
+                and (include_unknown or not _is_unknown_month(month))
+            },
             reverse=(order != "asc"),
         )
         output: list[TimelineMonthSummary] = []
@@ -371,9 +361,8 @@ def get_month_sources(month: str, *, db_path: str | Path | None = None) -> dict[
     if not selected_month:
         return _empty_month_sources(month or "")
     with connect(db_path) as conn:
-        note_where, note_params = _month_filter_sql("COALESCE(notes.note_date, notes.modified_at, notes.created_at, notes.imported_at, '')", selected_month)
-        notes = [dict(row) for row in conn.execute(
-            f"""
+        all_notes = [dict(row) for row in conn.execute(
+            """
             SELECT notes.*, note_summaries.generated_title, note_summaries.one_line_summary,
                    note_summaries.detailed_summary, note_summaries.important_points_json,
                    note_summaries.revisit_reason, note_summaries.confidence AS summary_confidence,
@@ -381,67 +370,103 @@ def get_month_sources(month: str, *, db_path: str | Path | None = None) -> dict[
                    note_summaries.evidence_json AS summary_evidence_json
             FROM notes
             LEFT JOIN note_summaries ON note_summaries.note_id = notes.id
-            WHERE {note_where}
-            ORDER BY COALESCE(notes.note_date, notes.modified_at, notes.created_at, notes.imported_at) ASC
             """,
-            note_params,
         ).fetchall()]
+        for row in all_notes:
+            row["_timeline_date_value"] = _note_timeline_date(row)
+        notes = sorted(
+            [row for row in all_notes if _month_matches(row.get("_timeline_date_value"), selected_month)],
+            key=lambda row: str(row.get("_timeline_date_value") or ""),
+        )
         summaries = [row for row in notes if row.get("generated_title") or row.get("one_line_summary")]
-        event_where, event_params = _month_filter_sql("COALESCE(events.event_date, events.date_label, notes.note_date, notes.modified_at, notes.imported_at, '')", selected_month)
-        events = [dict(row) for row in conn.execute(
-            f"""
+        event_rows = [dict(row) for row in conn.execute(
+            """
             SELECT events.*, notes.title AS note_title, notes.source_relative_path,
-                   COALESCE(notes.note_date, notes.modified_at, notes.imported_at, '') AS note_date_value
+                   notes.created_at AS note_created_at,
+                   notes.modified_at AS note_modified_at,
+                   notes.note_date AS note_note_date,
+                   notes.imported_at AS note_imported_at
             FROM events
             JOIN notes ON notes.id = events.note_id
-            WHERE {event_where}
-            ORDER BY COALESCE(events.event_date, events.date_label, notes.note_date, notes.modified_at, notes.imported_at) ASC
             """,
-            event_params,
         ).fetchall()]
-        thought_where, thought_params = _month_filter_sql("COALESCE(thoughts.date_label, notes.note_date, notes.modified_at, notes.imported_at, '')", selected_month)
-        thoughts = [dict(row) for row in conn.execute(
-            f"""
+        for row in event_rows:
+            row["note_date_value"] = _note_timeline_date(
+                {
+                    "created_at": row.get("note_created_at"),
+                    "modified_at": row.get("note_modified_at"),
+                    "note_date": row.get("note_note_date"),
+                    "imported_at": row.get("note_imported_at"),
+                }
+            )
+            row["_timeline_date_value"] = _first_date_value(row.get("event_date"), row.get("date_label"), row.get("note_date_value"))
+        events = sorted(
+            [row for row in event_rows if _month_matches(row.get("_timeline_date_value"), selected_month)],
+            key=lambda row: str(row.get("_timeline_date_value") or ""),
+        )
+        thought_rows = [dict(row) for row in conn.execute(
+            """
             SELECT thoughts.*, notes.title AS note_title, notes.source_relative_path,
-                   COALESCE(notes.note_date, notes.modified_at, notes.imported_at, '') AS note_date_value
+                   notes.created_at AS note_created_at,
+                   notes.modified_at AS note_modified_at,
+                   notes.note_date AS note_note_date,
+                   notes.imported_at AS note_imported_at
             FROM thoughts
             JOIN notes ON notes.id = thoughts.note_id
-            WHERE {thought_where}
-            ORDER BY COALESCE(thoughts.date_label, notes.note_date, notes.modified_at, notes.imported_at) ASC
             """,
-            thought_params,
         ).fetchall()]
+        for row in thought_rows:
+            row["note_date_value"] = _note_timeline_date(
+                {
+                    "created_at": row.get("note_created_at"),
+                    "modified_at": row.get("note_modified_at"),
+                    "note_date": row.get("note_note_date"),
+                    "imported_at": row.get("note_imported_at"),
+                }
+            )
+            row["_timeline_date_value"] = _first_date_value(row.get("date_label"), row.get("note_date_value"))
+        thoughts = sorted(
+            [row for row in thought_rows if _month_matches(row.get("_timeline_date_value"), selected_month)],
+            key=lambda row: str(row.get("_timeline_date_value") or ""),
+        )
+        selected_note_ids = {str(row.get("id")) for row in notes}
         categories = [dict(row) for row in conn.execute(
-            f"""
+            """
             SELECT notes.id AS note_id, categories.name, note_categories.confidence, note_categories.importance,
                    note_categories.evidence_json
             FROM notes
             JOIN note_categories ON note_categories.note_id = notes.id
             JOIN categories ON categories.id = note_categories.category_id
-            WHERE {note_where}
             """,
-            note_params,
         ).fetchall()]
-        suggestion_where, suggestion_params = _month_filter_sql("COALESCE(suggestions.target_date, '')", selected_month)
-        suggestion_note_where, suggestion_note_params = _month_filter_sql("COALESCE(n.note_date, n.modified_at, n.imported_at, '')", selected_month)
-        suggestions = [dict(row) for row in conn.execute(
-            f"""
-            SELECT suggestions.*, notes.title AS note_title, notes.source_relative_path
+        categories = [row for row in categories if str(row.get("note_id")) in selected_note_ids]
+        suggestion_rows = [dict(row) for row in conn.execute(
+            """
+            SELECT suggestions.*, notes.title AS note_title, notes.source_relative_path,
+                   notes.created_at AS note_created_at,
+                   notes.modified_at AS note_modified_at,
+                   notes.note_date AS note_note_date,
+                   notes.imported_at AS note_imported_at
             FROM suggestions
             LEFT JOIN notes ON notes.id = suggestions.note_id
-            WHERE {suggestion_where}
-               OR (
-                    suggestions.note_id IS NOT NULL
-                    AND EXISTS (
-                        SELECT 1 FROM notes n
-                        WHERE n.id = suggestions.note_id
-                          AND {suggestion_note_where}
-                    )
-               )
             ORDER BY COALESCE(suggestions.importance, 0.0) DESC, suggestions.created_at DESC
-            """,
-            suggestion_params + suggestion_note_params,
+            """
         ).fetchall()]
+        for row in suggestion_rows:
+            row["note_date_value"] = _note_timeline_date(
+                {
+                    "created_at": row.get("note_created_at"),
+                    "modified_at": row.get("note_modified_at"),
+                    "note_date": row.get("note_note_date"),
+                    "imported_at": row.get("note_imported_at"),
+                }
+            )
+        note_dates = _note_date_lookup(conn)
+        suggestions = [
+            row
+            for row in (_attribute_suggestion_to_month(row, note_dates) for row in suggestion_rows)
+            if row is not None and row.get("_timeline_month") == selected_month
+        ]
         reflections = [dict(row) for row in conn.execute(
             "SELECT * FROM monthly_reflections WHERE month = ?",
             (selected_month,),
@@ -458,9 +483,14 @@ def get_month_sources(month: str, *, db_path: str | Path | None = None) -> dict[
     }
 
 
-def build_month_timeline_items(month: str, *, db_path: str | Path | None = None) -> list[MonthTimelineItem]:
+def build_month_timeline_items(
+    month: str,
+    *,
+    db_path: str | Path | None = None,
+    limits: TimelineBuildLimits | None = None,
+) -> list[MonthTimelineItem]:
     sources = get_month_sources(month, db_path=db_path)
-    return _build_month_timeline_items_from_sources(sources)
+    return _build_month_timeline_items_from_sources(sources, limits=limits)
 
 
 def generate_month_timeline_snapshot(
@@ -471,11 +501,12 @@ def generate_month_timeline_snapshot(
     force: bool = False,
     dry_run: bool = False,
     show_sources: bool = False,
+    limits: TimelineBuildLimits | None = None,
 ) -> MonthTimelineSnapshot:
     _ = show_sources
     sources = get_month_sources(month, db_path=db_path)
     selected_month = sources.get("month") or _normalize_month(month) or month
-    items = _build_month_timeline_items_from_sources(sources)
+    items = _build_month_timeline_items_from_sources(sources, limits=limits)
     source_counts = _source_counts_from_sources(sources)
     source_hash = _source_hash(sources, items)
     now = datetime.now(tz=timezone.utc).isoformat()
@@ -519,11 +550,16 @@ def generate_timeline_snapshots(
     backend: str = "rule",
     force: bool = False,
     dry_run: bool = False,
+    limits: TimelineBuildLimits | None = None,
+    include_unknown: bool = False,
     progress_callback=None,
 ) -> list[MonthTimelineSnapshot]:
     values = months or []
     if all_months or not values:
-        values = [row.month for row in list_timeline_months(db_path=db_path, order="desc")]
+        values = [
+            row.month
+            for row in list_timeline_months(db_path=db_path, order="desc", include_unknown=include_unknown)
+        ]
     if limit_months is not None:
         values = values[: max(0, int(limit_months))]
     snapshots = []
@@ -539,6 +575,7 @@ def generate_timeline_snapshots(
                     backend=backend,
                     force=force,
                     dry_run=dry_run,
+                    limits=limits,
                 )
             )
         except Exception:
@@ -585,8 +622,12 @@ def list_month_timeline_snapshots(
     db_path: str | Path | None = None,
     order: str = "desc",
     limit: int | None = None,
+    include_unknown: bool = False,
 ) -> list[MonthTimelineSnapshot]:
-    months = [item.month for item in list_timeline_months(db_path=db_path, order=order)]
+    months = [
+        item.month
+        for item in list_timeline_months(db_path=db_path, order=order, include_unknown=include_unknown)
+    ]
     if year:
         months = [month for month in months if month.startswith(str(year))]
     if limit is not None:
@@ -630,15 +671,25 @@ def format_month_timeline_markdown(snapshot: MonthTimelineSnapshot) -> str:
     warnings = snapshot.quality.get("warnings") or []
     if warnings:
         lines.extend(["", "### Quality Warnings", *[f"- {warning}" for warning in warnings]])
-    lines.extend(["", "### Timeline Items"])
-    sorted_items = sorted(snapshot.items, key=lambda row: row.sort_key)
-    for item in sorted_items[:20]:
-        lines.append(
-            f"- {item.date_label or '日付不明'} [{item.item_type}] "
-            f"{_short(item.title, 80)}: {_short(item.summary, 120)} (`{item.source_note_id[:12]}`)"
-        )
-    if len(sorted_items) > 20:
-        lines.append(f"- ... (+{len(sorted_items) - 20} more items; open the GUI Timeline tab for detail)")
+    def append_item_section(title: str, values: list[MonthTimelineItem], max_count: int) -> None:
+        lines.extend(["", f"### {title}"])
+        if not values:
+            lines.append("- なし")
+            return
+        for item in sorted(values, key=lambda row: row.sort_key)[:max_count]:
+            lines.append(
+                f"- {item.date_label or '日付不明'} [{item.item_type}] "
+                f"{_short(item.title, 80)}: {_short(item.summary, 120)} (`{item.source_note_id[:12]}`)"
+            )
+        if len(values) > max_count:
+            lines.append(f"- ... (+{len(values) - max_count} more items; open the GUI Timeline tab for detail)")
+
+    main_items = [item for item in snapshot.items if item.item_type != "suggestion" and not _is_low_priority_item(item)]
+    suggestion_items = [item for item in snapshot.items if item.item_type == "suggestion" and not _is_low_priority_item(item)]
+    low_priority_items = [item for item in snapshot.items if _is_low_priority_item(item)]
+    append_item_section("Main Timeline Items", main_items, 20)
+    append_item_section("Supporting Suggestions", suggestion_items, 10)
+    append_item_section("Low Priority / Needs Review", low_priority_items, 10)
     return "\n".join(lines)
 
 
@@ -661,10 +712,14 @@ def timeline_qa(
     month: str | None = None,
     all_months: bool = False,
     db_path: str | Path | None = None,
+    include_unknown: bool = False,
 ) -> list[dict[str, Any]]:
     months = [month] if month else []
     if all_months or not months:
-        months = [item.month for item in list_timeline_months(db_path=db_path, order="desc")]
+        months = [
+            item.month
+            for item in list_timeline_months(db_path=db_path, order="desc", include_unknown=include_unknown)
+        ]
     rows = []
     for value in months:
         if not value:
@@ -768,45 +823,125 @@ def _source_counts_from_sources(sources: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _timeline_month_values(conn) -> list[str]:
+    months: set[str] = set()
+    note_dates = _note_date_lookup(conn)
+    months.update(
+        month
+        for date_value in note_dates.values()
+        if (month := _normalize_month_key(date_value))
+    )
+    event_rows = conn.execute(
+        """
+        SELECT events.event_date, events.date_label,
+               notes.created_at AS note_created_at,
+               notes.modified_at AS note_modified_at,
+               notes.note_date AS note_note_date,
+               notes.imported_at AS note_imported_at
+        FROM events
+        JOIN notes ON notes.id = events.note_id
+        """
+    ).fetchall()
+    for row in event_rows:
+        note_date = _note_timeline_date(
+            {
+                "created_at": row["note_created_at"],
+                "modified_at": row["note_modified_at"],
+                "note_date": row["note_note_date"],
+                "imported_at": row["note_imported_at"],
+            }
+        )
+        if month := _normalize_month_key(_first_date_value(row["event_date"], row["date_label"], note_date)):
+            months.add(month)
+    thought_rows = conn.execute(
+        """
+        SELECT thoughts.date_label,
+               notes.created_at AS note_created_at,
+               notes.modified_at AS note_modified_at,
+               notes.note_date AS note_note_date,
+               notes.imported_at AS note_imported_at
+        FROM thoughts
+        JOIN notes ON notes.id = thoughts.note_id
+        """
+    ).fetchall()
+    for row in thought_rows:
+        note_date = _note_timeline_date(
+            {
+                "created_at": row["note_created_at"],
+                "modified_at": row["note_modified_at"],
+                "note_date": row["note_note_date"],
+                "imported_at": row["note_imported_at"],
+            }
+        )
+        if month := _normalize_month_key(_first_date_value(row["date_label"], note_date)):
+            months.add(month)
+    suggestion_rows = conn.execute(
+        """
+        SELECT suggestions.*, notes.title AS note_title, notes.source_relative_path,
+               notes.created_at AS note_created_at,
+               notes.modified_at AS note_modified_at,
+               notes.note_date AS note_note_date,
+               notes.imported_at AS note_imported_at
+        FROM suggestions
+        LEFT JOIN notes ON notes.id = suggestions.note_id
+        """
+    ).fetchall()
+    for row in suggestion_rows:
+        row_dict = dict(row)
+        row_dict["note_date_value"] = _note_timeline_date(
+            {
+                "created_at": row_dict.get("note_created_at"),
+                "modified_at": row_dict.get("note_modified_at"),
+                "note_date": row_dict.get("note_note_date"),
+                "imported_at": row_dict.get("note_imported_at"),
+            }
+        )
+        attributed = _attribute_suggestion_to_month(row_dict, note_dates)
+        if attributed and attributed.get("_timeline_month"):
+            months.add(str(attributed["_timeline_month"]))
+    for table in ("monthly_reflections", "monthly_timeline_snapshots"):
+        rows = conn.execute(f"SELECT month FROM {table} WHERE month IS NOT NULL AND month != ''").fetchall()
+        months.update(
+            month
+            for row in rows
+            if (month := _normalize_month_key(row["month"]))
+        )
+    return sorted(months)
+
+
 def _month_source_counts(conn, month: str) -> dict[str, int]:
-    notes_where, notes_params = _month_filter_sql("COALESCE(note_date, modified_at, created_at, imported_at, '')", month)
-    notes = conn.execute(
-        f"SELECT COUNT(*) AS count FROM notes WHERE {notes_where}",
-        notes_params,
-    ).fetchone()["count"]
-    note_join_where, note_join_params = _month_filter_sql("COALESCE(notes.note_date, notes.modified_at, notes.created_at, notes.imported_at, '')", month)
+    notes_rows = conn.execute(
+        "SELECT id, created_at, modified_at, note_date, imported_at FROM notes"
+    ).fetchall()
+    note_dates = {
+        str(row["id"]): _note_timeline_date(row)
+        for row in notes_rows
+    }
+    notes = sum(1 for date_value in note_dates.values() if _month_matches(date_value, month))
     summaries = conn.execute(
-        f"""
-        SELECT COUNT(*) AS count
-        FROM note_summaries
-        JOIN notes ON notes.id = note_summaries.note_id
-        WHERE {note_join_where}
-        """,
-        note_join_params,
-    ).fetchone()["count"]
-    event_where, event_params = _month_filter_sql("COALESCE(events.event_date, events.date_label, notes.note_date, notes.modified_at, notes.imported_at, '')", month)
-    events = conn.execute(
-        f"""
-        SELECT COUNT(*) AS count
-        FROM events JOIN notes ON notes.id = events.note_id
-        WHERE {event_where}
-        """,
-        event_params,
-    ).fetchone()["count"]
-    thought_where, thought_params = _month_filter_sql("COALESCE(thoughts.date_label, notes.note_date, notes.modified_at, notes.imported_at, '')", month)
-    thoughts = conn.execute(
-        f"""
-        SELECT COUNT(*) AS count
-        FROM thoughts JOIN notes ON notes.id = thoughts.note_id
-        WHERE {thought_where}
-        """,
-        thought_params,
-    ).fetchone()["count"]
-    suggestion_where, suggestion_params = _month_filter_sql("COALESCE(target_date, '')", month)
-    suggestions = conn.execute(
-        f"SELECT COUNT(*) AS count FROM suggestions WHERE {suggestion_where}",
-        suggestion_params,
-    ).fetchone()["count"]
+        "SELECT note_id FROM note_summaries"
+    ).fetchall()
+    summaries = sum(1 for row in summaries if _month_matches(note_dates.get(str(row["note_id"])), month))
+    event_rows = conn.execute(
+        """
+        SELECT events.event_date, events.date_label, events.note_id
+        FROM events
+        """
+    ).fetchall()
+    events = sum(
+        1
+        for row in event_rows
+        if _month_matches(_first_date_value(row["event_date"], row["date_label"], note_dates.get(str(row["note_id"]))), month)
+    )
+    thought_rows = conn.execute(
+        "SELECT thoughts.date_label, thoughts.note_id FROM thoughts"
+    ).fetchall()
+    thoughts = sum(
+        1
+        for row in thought_rows
+        if _month_matches(_first_date_value(row["date_label"], note_dates.get(str(row["note_id"]))), month)
+    )
+    suggestions = _month_suggestion_count(conn, month)
     return {
         "notes": int(notes or 0),
         "summaries": int(summaries or 0),
@@ -816,16 +951,33 @@ def _month_source_counts(conn, month: str) -> dict[str, int]:
     }
 
 
-def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[MonthTimelineItem]:
+def _build_month_timeline_items_from_sources(
+    sources: dict[str, Any],
+    *,
+    limits: TimelineBuildLimits | None = None,
+) -> list[MonthTimelineItem]:
+    limits = limits or DEFAULT_TIMELINE_LIMITS
     month = sources.get("month") or ""
     category_by_note = _categories_by_note(sources.get("categories") or [])
-    items: list[MonthTimelineItem] = []
+    by_type: dict[str, list[MonthTimelineItem]] = {
+        "thought": [],
+        "event": [],
+        "note_summary": [],
+        "suggestion": [],
+        "fallback": [],
+    }
     now = datetime.now(tz=timezone.utc).isoformat()
     for row in sources.get("events") or []:
         evidence = _evidence(row.get("evidence_json"), row.get("note_id", ""))
-        date_value = row.get("event_date") or row.get("date_label") or row.get("note_date_value") or ""
+        date_value = _first_date_value(row.get("event_date"), row.get("date_label"), row.get("note_date_value"))
         categories = category_by_note.get(row.get("note_id"), [])
-        items.append(
+        title = row.get("title") or "Event"
+        summary = row.get("summary") or ""
+        categories = _with_quality_tags(
+            categories,
+            _low_priority_reasons(title, summary, row.get("event_type") or "", evidence, categories, row.get("source_relative_path")),
+        )
+        by_type["event"].append(
             MonthTimelineItem(
                 id=_stable_id("event", month, row.get("id"), row.get("note_id"), row.get("title")),
                 month=month,
@@ -833,8 +985,8 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
                 date_end="",
                 date_label=row.get("date_label") or row.get("event_date") or "日付不明",
                 item_type="event",
-                title=row.get("title") or "Event",
-                summary=row.get("summary") or "",
+                title=title,
+                summary=summary,
                 detail=row.get("event_type") or "",
                 themes=[],
                 categories=categories,
@@ -852,10 +1004,16 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
         )
     for row in sources.get("thoughts") or []:
         evidence = _evidence(row.get("evidence_json"), row.get("note_id", ""))
-        date_value = row.get("date_label") or row.get("note_date_value") or ""
+        date_value = _first_date_value(row.get("date_label"), row.get("note_date_value"))
         themes = _json_list(row.get("themes_json"))
         categories = category_by_note.get(row.get("note_id"), [])
-        items.append(
+        title = row.get("title") or "Thought"
+        summary = row.get("summary") or ""
+        categories = _with_quality_tags(
+            categories,
+            _low_priority_reasons(title, summary, row.get("remember_reason") or "", evidence, categories, row.get("source_relative_path")),
+        )
+        by_type["thought"].append(
             MonthTimelineItem(
                 id=_stable_id("thought", month, row.get("id"), row.get("note_id"), row.get("title")),
                 month=month,
@@ -863,8 +1021,8 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
                 date_end="",
                 date_label=row.get("date_label") or row.get("note_date_value") or "日付不明",
                 item_type="thought",
-                title=row.get("title") or "Thought",
-                summary=row.get("summary") or "",
+                title=title,
+                summary=summary,
                 detail=row.get("remember_reason") or "",
                 themes=[str(item) for item in themes[:6]],
                 categories=categories,
@@ -882,14 +1040,20 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
         )
     for row in sources.get("summaries") or []:
         evidence = _evidence(row.get("summary_evidence_json"), row.get("id", ""))
-        date_value = row.get("note_date") or row.get("modified_at") or row.get("created_at") or row.get("imported_at") or ""
+        date_value = _first_date_value(row.get("_timeline_date_value"), row.get("created_at"), row.get("modified_at"), row.get("note_date"), row.get("imported_at"))
         categories = category_by_note.get(row.get("id"), [])
         points = " / ".join(str(item) for item in _json_list(row.get("important_points_json"))[:3])
         revisit = row.get("revisit_reason") or ""
         base_importance = row.get("summary_importance")
         if not revisit and _float_safe(base_importance) < 0.6:
             continue
-        items.append(
+        title = row.get("generated_title") or row.get("title") or "Note"
+        summary = row.get("one_line_summary") or points or row.get("title") or ""
+        categories = _with_quality_tags(
+            categories,
+            _low_priority_reasons(title, summary, revisit, evidence, categories, row.get("source_relative_path")),
+        )
+        by_type["note_summary"].append(
             MonthTimelineItem(
                 id=_stable_id("summary", month, row.get("id"), row.get("content_hash")),
                 month=month,
@@ -897,8 +1061,8 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
                 date_end="",
                 date_label=(date_value or "日付不明")[:10],
                 item_type="note_summary",
-                title=row.get("generated_title") or row.get("title") or "Note",
-                summary=row.get("one_line_summary") or points or row.get("title") or "",
+                title=title,
+                summary=summary,
                 detail=revisit,
                 themes=[],
                 categories=categories,
@@ -917,9 +1081,15 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
     for row in sources.get("suggestions") or []:
         note_id = row.get("note_id") or ""
         evidence = _evidence(row.get("evidence_json"), note_id)
-        date_value = row.get("target_date") or ""
+        date_value = row.get("_timeline_date_value") or row.get("target_date") or ""
         categories = category_by_note.get(note_id, [])
-        items.append(
+        title = row.get("title") or "Suggestion"
+        summary = row.get("message") or ""
+        reasons = _low_priority_reasons(title, summary, row.get("suggestion_type") or "", evidence, categories, row.get("source_relative_path"))
+        if row.get("_timeline_attribution_warning"):
+            reasons.append(str(row["_timeline_attribution_warning"]))
+        categories = _with_quality_tags(categories, reasons)
+        by_type["suggestion"].append(
             MonthTimelineItem(
                 id=_stable_id("suggestion", month, row.get("id"), note_id, row.get("title")),
                 month=month,
@@ -927,8 +1097,8 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
                 date_end="",
                 date_label=(date_value or "日付不明")[:10],
                 item_type="suggestion",
-                title=row.get("title") or "Suggestion",
-                summary=row.get("message") or "",
+                title=title,
+                summary=summary,
                 detail=row.get("suggestion_type") or "",
                 themes=[],
                 categories=categories,
@@ -938,13 +1108,24 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
                 source_id=str(row.get("id") or ""),
                 source_note_id=note_id,
                 confidence=_score_confidence(row.get("confidence"), evidence=evidence, date_value=date_value),
-                importance=_score_importance(row.get("importance"), evidence=evidence, categories=categories, date_value=date_value),
-                date_confidence=_date_confidence_score("medium" if date_value else "unknown"),
+                importance=max(
+                    0.0,
+                    _score_importance(row.get("importance"), evidence=evidence, categories=categories, date_value=date_value)
+                    - _suggestion_importance_penalty(row),
+                ),
+                date_confidence=_date_confidence_score(row.get("_timeline_date_confidence") or ("medium" if date_value else "unknown")),
                 sort_key=_sort_key(date_value, "suggestion", row.get("id")),
                 created_at=now,
             )
         )
-    return sorted(items, key=lambda item: (item.sort_key, -item.importance))
+    selected = (
+        _select_limited_items(by_type["thought"], limits.max_thoughts)
+        + _select_limited_items(by_type["event"], limits.max_events)
+        + _select_limited_items(by_type["note_summary"], limits.max_summaries)
+        + _select_limited_items(by_type["suggestion"], limits.max_suggestions)
+        + _select_limited_items(by_type["fallback"], limits.max_fallback)
+    )
+    return sorted(selected, key=lambda item: (item.sort_key, _item_type_rank(item.item_type), _is_low_priority_item(item), -item.importance))
 
 
 def _categories_by_note(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -955,6 +1136,209 @@ def _categories_by_note(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
         if note_id and name:
             result.setdefault(note_id, []).append(str(name))
     return result
+
+
+def _note_date_lookup(conn) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT id, created_at, modified_at, note_date, imported_at
+        FROM notes
+        """
+    ).fetchall()
+    return {str(row["id"]): _note_timeline_date(row) for row in rows}
+
+
+def _note_timeline_date(row: dict[str, Any] | Any) -> str:
+    created_at = str(row["created_at"] or "") if "created_at" in row.keys() else str(row.get("created_at") or "")
+    modified_at = str(row["modified_at"] or "") if "modified_at" in row.keys() else str(row.get("modified_at") or "")
+    note_date = str(row["note_date"] or "") if "note_date" in row.keys() else str(row.get("note_date") or "")
+    imported_at = str(row["imported_at"] or "") if "imported_at" in row.keys() else str(row.get("imported_at") or "")
+    if created_at and not _created_at_looks_imported(created_at, imported_at, modified_at, note_date):
+        return created_at
+    return _first_date_value(note_date, modified_at, created_at, imported_at)
+
+
+def _created_at_looks_imported(created_at: str, imported_at: str, modified_at: str, note_date: str) -> bool:
+    created_month = _normalize_month_key(created_at)
+    imported_month = _normalize_month_key(imported_at)
+    if not created_month or not imported_month or created_month != imported_month:
+        return False
+    alternate_months = {
+        month
+        for value in (note_date, modified_at)
+        if (month := _normalize_month_key(value)) and not _is_unknown_month(month)
+    }
+    return bool(alternate_months and created_month not in alternate_months)
+
+
+def _month_matches(date_value: Any, month: str) -> bool:
+    return _normalize_month_key(str(date_value or "")) == _normalize_month_key(month)
+
+
+def _month_suggestion_count(conn, month: str) -> int:
+    note_dates = _note_date_lookup(conn)
+    rows = conn.execute(
+        """
+        SELECT suggestions.*, notes.title AS note_title, notes.source_relative_path,
+               COALESCE(notes.created_at, notes.modified_at, notes.note_date, notes.imported_at, '') AS note_date_value
+        FROM suggestions
+        LEFT JOIN notes ON notes.id = suggestions.note_id
+        """
+    ).fetchall()
+    return sum(
+        1
+        for row in (_attribute_suggestion_to_month(dict(row), note_dates) for row in rows)
+        if row is not None and row.get("_timeline_month") == month
+    )
+
+
+def _attribute_suggestion_to_month(row: dict[str, Any], note_dates: dict[str, str]) -> dict[str, Any] | None:
+    target_date = str(row.get("target_date") or "")
+    created_at = str(row.get("created_at") or "")
+    target_month = _normalize_month_key(target_date)
+    created_month = _normalize_month_key(created_at)
+    evidence_date = _suggestion_evidence_date(row, note_dates)
+    evidence_month = _normalize_month_key(evidence_date)
+    target_looks_generated = bool(target_month and created_month and target_month == created_month)
+
+    if _is_unknown_month(target_month or ""):
+        target_month = None
+    if _is_unknown_month(evidence_month or ""):
+        evidence_month = None
+
+    if target_month and not target_looks_generated:
+        row["_timeline_month"] = target_month
+        row["_timeline_date_value"] = target_date
+        row["_timeline_date_confidence"] = "medium"
+        return row
+    if evidence_month:
+        row["_timeline_month"] = evidence_month
+        row["_timeline_date_value"] = evidence_date
+        row["_timeline_date_confidence"] = "medium"
+        if target_looks_generated:
+            row["_timeline_attribution_warning"] = "generated_date_used_for_suggestion"
+        return row
+    return None
+
+
+def _suggestion_evidence_date(row: dict[str, Any], note_dates: dict[str, str]) -> str:
+    note_id = str(row.get("note_id") or "")
+    if note_id and note_dates.get(note_id):
+        return note_dates[note_id]
+    for item in _evidence(row.get("evidence_json"), note_id):
+        evidence_note_id = str(item.get("note_id") or "")
+        if evidence_note_id and note_dates.get(evidence_note_id):
+            return note_dates[evidence_note_id]
+    return str(row.get("note_date_value") or "")
+
+
+def _first_date_value(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if _normalize_month_key(text):
+            return text
+    return ""
+
+
+def _select_limited_items(items: list[MonthTimelineItem], limit: int) -> list[MonthTimelineItem]:
+    if limit <= 0:
+        return []
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            _is_low_priority_item(item),
+            -item.importance,
+            -item.confidence,
+            item.sort_key,
+        ),
+    )
+    return ranked[:limit]
+
+
+def _item_type_rank(item_type: str) -> int:
+    return {"thought": 0, "event": 1, "note_summary": 2, "suggestion": 3, "fallback": 4}.get(item_type, 5)
+
+
+def _suggestion_importance_penalty(row: dict[str, Any]) -> float:
+    penalty = 0.12
+    suggestion_type = str(row.get("suggestion_type") or "")
+    if suggestion_type in {"important_thought", "important_event"} and not row.get("_timeline_attribution_warning"):
+        penalty = 0.05
+    if row.get("_timeline_attribution_warning"):
+        penalty += 0.1
+    return penalty
+
+
+def _with_quality_tags(categories: list[str], reasons: list[str]) -> list[str]:
+    values = list(dict.fromkeys(str(item) for item in categories if item))
+    if reasons:
+        values.append(LOW_PRIORITY_TAG)
+        values.extend(f"quality:{reason}" for reason in reasons[:3])
+    return list(dict.fromkeys(values))
+
+
+def _low_priority_reasons(
+    title: str,
+    summary: str,
+    detail: str,
+    evidence: list[dict[str, str]],
+    categories: list[str],
+    source_path: str | None,
+) -> list[str]:
+    text = f"{title}\n{summary}\n{detail}\n{source_path or ''}".lower()
+    reasons: list[str] = []
+    lyric_tokens = ["歌詞", "lyrics", "ado", "sixtones", "six tones", "マスカラ", "風のゆくえ"]
+    shopping_tokens = ["買い物", "購入", "メニュー", "値段", "金額", "スーパー", "円"]
+    if any(token.lower() in text for token in lyric_tokens) or _looks_like_repeated_lyrics(summary):
+        reasons.append("lyric_or_music")
+    if any(token.lower() in text for token in shopping_tokens):
+        reasons.append("shopping_or_menu")
+    if "pdf" in text or "｜｜" in text or _looks_noisy(summary):
+        reasons.append("noisy_pdf_or_text")
+    if re.search(r"https?://|www\.", text) and len(summary.strip()) < 80:
+        reasons.append("link_only")
+    if len(summary.strip()) < 12:
+        reasons.append("very_short_summary")
+    if categories and set(categories) <= {"その他"}:
+        reasons.append("only_other_category")
+    return list(dict.fromkeys(reasons))
+
+
+def _looks_like_repeated_lyrics(text: str) -> bool:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) < 6:
+        return False
+    short_lines = sum(1 for line in lines if len(line) <= 24)
+    repeated = len(lines) - len(set(lines))
+    return short_lines / len(lines) >= 0.7 or repeated >= 3
+
+
+def _looks_noisy(text: str) -> bool:
+    value = str(text or "")
+    if not value:
+        return False
+    odd = sum(1 for char in value if char in "|｜□■�")
+    return odd >= 4 or (odd / max(len(value), 1)) > 0.08
+
+
+def _is_low_priority_item(item: MonthTimelineItem) -> bool:
+    if item.importance < 0.25:
+        return True
+    if item.confidence < 0.35 and item.importance < 0.5:
+        return True
+    return LOW_PRIORITY_TAG in item.categories or any(str(value).startswith("quality:") for value in item.categories)
+
+
+def is_low_priority_timeline_item(item: MonthTimelineItem) -> bool:
+    return _is_low_priority_item(item)
+
+
+def _main_material_items(items: list[MonthTimelineItem]) -> list[MonthTimelineItem]:
+    return [item for item in items if item.item_type in {"thought", "event", "note_summary"} and not _is_low_priority_item(item)]
+
+
+def _direct_items(items: list[MonthTimelineItem]) -> list[MonthTimelineItem]:
+    return [item for item in items if item.item_type in {"thought", "event", "note_summary"}]
 
 
 def _source_hash(sources: dict[str, Any], items: list[MonthTimelineItem]) -> str:
@@ -969,34 +1353,54 @@ def _source_hash(sources: dict[str, Any], items: list[MonthTimelineItem]) -> str
 
 def _month_title(month: str, sources: dict[str, Any], items: list[MonthTimelineItem]) -> str:
     categories = _dominant_categories(sources)
+    main_items = _main_material_items(items)
     if len(categories) >= 2:
         return f"{categories[0]}と{categories[1]}を見返す月"
     if categories:
         return f"{categories[0]}を中心にした月"
-    top = next((item.title for item in sorted(items, key=lambda item: item.importance, reverse=True) if item.title), "")
+    top = next(
+        (
+            item.title
+            for item in sorted(main_items or items, key=lambda item: item.importance, reverse=True)
+            if item.title
+        ),
+        "",
+    )
     return f"{top}を見返す月" if top else f"{month}の記憶カード"
 
 
 def _month_overview(month: str, sources: dict[str, Any], items: list[MonthTimelineItem], title: str) -> str:
     counts = _source_counts_from_sources(sources)
     categories = "、".join(_dominant_categories(sources)[:4])
-    top_items = sorted(items, key=lambda item: item.importance, reverse=True)[:3]
+    main_items = _main_material_items(items)
+    top_items = sorted(main_items, key=lambda item: item.importance, reverse=True)[:4]
     top_text = "、".join(item.title for item in top_items if item.title)
     if counts["notes"] == 0:
         return f"{month} はまだメモが少ないため、Timelineの材料が不足しています。"
     if top_text:
+        provisional = ""
+        if counts["thoughts"] < 2 or counts["events"] < 2:
+            provisional = "ただし、この月の直接抽出されたthought/eventはまだ少ないため、要約は暫定です。"
         return (
             f"{month}は、{categories or title}に関する記録が目立つ月です。"
             f"メモ上では、{top_text} などが重要な手がかりとして残っています。"
+            f"{provisional}"
             "根拠が弱い項目は元メモを開いて確認してください。"
         )
     return f"{month}は、{categories or '複数テーマ'}に関するメモが残っている月です。分析を進めると振り返りが豊かになります。"
 
 
 def _thought_summary(sources: dict[str, Any], items: list[MonthTimelineItem]) -> str:
-    thoughts = [item for item in items if item.item_type == "thought"]
+    thoughts = [item for item in items if item.item_type == "thought" and not _is_low_priority_item(item)]
     if not thoughts:
-        return "この月のthought抽出はまだ少ないため、何を考えていたかはnote summaryとtitle fallbackからの控えめな推定になります。"
+        summaries = [item for item in items if item.item_type == "note_summary" and not _is_low_priority_item(item)]
+        if summaries:
+            snippets = " / ".join(_short(item.summary or item.title, 70) for item in summaries[:4])
+            return (
+                "この月のthought抽出はまだ少ないため、何を考えていたかはnote summaryからの控えめな推定になります。"
+                f"主な手がかりは、{snippets} です。"
+            )
+        return "この月のthought抽出はまだ少ないため、何を考えていたかはまだ十分に判断できません。"
     top = sorted(thoughts, key=lambda item: item.importance + item.confidence, reverse=True)[:4]
     themes = "、".join(_key_themes(sources, top)[:4])
     snippets = " / ".join(_short(item.summary or item.title, 70) for item in top)
@@ -1004,9 +1408,16 @@ def _thought_summary(sources: dict[str, Any], items: list[MonthTimelineItem]) ->
 
 
 def _event_summary(sources: dict[str, Any], items: list[MonthTimelineItem]) -> str:
-    events = [item for item in items if item.item_type == "event"]
+    events = [item for item in items if item.item_type == "event" and not _is_low_priority_item(item)]
     if not events:
-        return "この月のevent抽出はまだ少ないため、出来事の把握はnote summaryに寄っています。analyze-all後に再生成すると改善します。"
+        summaries = [item for item in items if item.item_type == "note_summary" and not _is_low_priority_item(item)]
+        if summaries:
+            snippets = "、".join(item.title for item in summaries[:4] if item.title)
+            return (
+                "この月のevent抽出はまだ少ないため、出来事の把握はnote summaryに寄っています。"
+                f"関連する記録として、{snippets} などがあります。"
+            )
+        return "この月のevent抽出はまだ少ないため、出来事の把握はまだ不十分です。analyze-all後に再生成すると改善します。"
     top = sorted(events, key=lambda item: item.importance + item.confidence, reverse=True)[:5]
     snippets = "、".join(item.title for item in top if item.title)
     return f"この月には、{snippets} などの出来事や進展が記録されています。"
@@ -1014,7 +1425,8 @@ def _event_summary(sources: dict[str, Any], items: list[MonthTimelineItem]) -> s
 
 def _important_timeline_changes(items: list[MonthTimelineItem]) -> list[str]:
     changes = []
-    for item in sorted(items, key=lambda row: row.importance, reverse=True):
+    material = _main_material_items(items) or [item for item in items if not _is_low_priority_item(item)]
+    for item in sorted(material, key=lambda row: row.importance, reverse=True):
         if item.importance < 0.55:
             continue
         phrase = "考えの変化" if item.item_type == "thought" else "出来事・進展"
@@ -1027,8 +1439,10 @@ def _important_timeline_changes(items: list[MonthTimelineItem]) -> list[str]:
 def _key_themes(sources: dict[str, Any], items: list[MonthTimelineItem]) -> list[str]:
     counter: Counter[str] = Counter()
     for item in items:
-        counter.update(item.themes)
-        counter.update(item.categories)
+        if _is_low_priority_item(item):
+            continue
+        counter.update(theme for theme in item.themes if not str(theme).startswith("quality:"))
+        counter.update(category for category in item.categories if category != LOW_PRIORITY_TAG and not str(category).startswith("quality:"))
     for category in sources.get("categories") or []:
         if category.get("name"):
             counter[str(category["name"])] += 1
@@ -1046,7 +1460,8 @@ def _dominant_categories(sources: dict[str, Any]) -> list[str]:
 
 def _timeline_rediscovery_points(items: list[MonthTimelineItem]) -> list[str]:
     points = []
-    for item in sorted(items, key=lambda row: row.importance + row.confidence, reverse=True)[:5]:
+    material = _main_material_items(items) or [item for item in items if not _is_low_priority_item(item)]
+    for item in sorted(material, key=lambda row: row.importance + row.confidence, reverse=True)[:5]:
         points.append(f"{item.title}: {_short(item.summary or item.detail, 110)}")
     return points
 
@@ -1054,10 +1469,15 @@ def _timeline_rediscovery_points(items: list[MonthTimelineItem]) -> list[str]:
 def _revisit_reasons(sources: dict[str, Any], items: list[MonthTimelineItem]) -> list[str]:
     values = []
     for row in sources.get("summaries") or []:
+        title = str(row.get("generated_title") or row.get("title") or "")
+        summary = str(row.get("one_line_summary") or row.get("detailed_summary") or "")
+        evidence = _evidence(row.get("summary_evidence_json"), row.get("id", ""))
+        if _low_priority_reasons(title, summary, str(row.get("revisit_reason") or ""), evidence, [], row.get("source_relative_path")):
+            continue
         reason = str(row.get("revisit_reason") or "").strip()
         if reason:
             values.append(_short(reason, 140))
-    for item in items:
+    for item in _main_material_items(items) or [item for item in items if not _is_low_priority_item(item)]:
         if item.detail and item.item_type in {"thought", "suggestion"}:
             values.append(_short(item.detail, 140))
     deduped = []
@@ -1069,7 +1489,8 @@ def _revisit_reasons(sources: dict[str, Any], items: list[MonthTimelineItem]) ->
 
 def _timeline_evidence(items: list[MonthTimelineItem]) -> list[dict[str, str]]:
     evidence = []
-    for item in sorted(items, key=lambda row: row.importance + row.confidence, reverse=True):
+    material = _main_material_items(items) or [item for item in items if not _is_low_priority_item(item)] or items
+    for item in sorted(material, key=lambda row: row.importance + row.confidence, reverse=True):
         for row in item.evidence:
             quote = str(row.get("quote") or "").strip()
             note_id = str(row.get("note_id") or item.source_note_id)
@@ -1093,25 +1514,53 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
         warnings.append("low_confidence")
     unknown_dates = sum(1 for item in items if not item.date_start)
     if items and unknown_dates / len(items) > 0.4:
-        warnings.append("unknown_date")
+        warnings.extend(["unknown_date", "date_attribution_uncertain"])
+    if any(item.date_confidence <= 0.35 for item in items):
+        warnings.append("date_attribution_uncertain")
+    direct_items = _direct_items(items)
+    main_items = _main_material_items(items)
+    suggestion_items = [item for item in items if item.item_type == "suggestion"]
+    active_suggestion_items = [item for item in suggestion_items if not _is_low_priority_item(item)]
+    low_priority_items = [item for item in items if _is_low_priority_item(item)]
     fallback_heavy = counts["thoughts"] < 2 and counts["events"] < 2 and counts["summaries"] > 0
     if fallback_heavy:
         warnings.append("fallback_heavy")
     if counts["thoughts"] < 2:
-        warnings.append("too_few_thoughts")
+        warnings.extend(["too_few_thoughts", "low_direct_thoughts"])
     if counts["events"] < 2:
-        warnings.append("too_few_events")
+        warnings.extend(["too_few_events", "low_direct_events"])
+    suggestions_dominated = bool(active_suggestion_items and len(active_suggestion_items) >= max(2, len(main_items)))
+    if suggestions_dominated:
+        warnings.append("suggestions_dominated")
+    if any(any(str(value).startswith("quality:") for value in item.categories) for item in low_priority_items):
+        warnings.append("noisy_items_present")
+    if low_priority_items:
+        warnings.append("low_value_items_present")
+    if any("quality:generated_date_used_for_suggestion" in item.categories for item in suggestion_items):
+        warnings.append("generated_date_used_for_suggestion")
+    if _is_unknown_month(str(sources.get("month") or "")):
+        warnings.append("invalid_month_1900")
     source_count = max(len(items), 1)
     quality_score = 1.0
-    quality_score -= 0.18 * len(set(warnings))
+    quality_score -= 0.1 * len(set(warnings))
+    if suggestions_dominated:
+        quality_score -= 0.2
+    if len(main_items) >= 3:
+        quality_score += 0.18
+    elif direct_items:
+        quality_score += 0.08
     quality_score += min(0.2, len(evidence_items) / source_count * 0.2)
     quality_score = max(0.0, min(1.0, quality_score))
     return {
         "source_counts": counts,
+        "item_counts": dict(Counter(item.item_type for item in items)),
+        "main_item_count": len(main_items),
+        "low_priority_item_count": len(low_priority_items),
         "evidence_coverage": len(evidence_items) / source_count,
         "thought_coverage": counts["thoughts"] / max(counts["notes"], 1),
         "event_coverage": counts["events"] / max(counts["notes"], 1),
         "is_fallback_heavy": fallback_heavy,
+        "is_suggestions_dominated": suggestions_dominated,
         "warnings": sorted(set(warnings)),
         "quality_score": quality_score,
     }
@@ -1125,7 +1574,8 @@ def _timeline_confidence(items: list[MonthTimelineItem], quality: dict[str, Any]
 def _timeline_importance(items: list[MonthTimelineItem]) -> float:
     if not items:
         return 0.2
-    top = sorted((item.importance for item in items), reverse=True)[:5]
+    material = _main_material_items(items) or [item for item in items if not _is_low_priority_item(item)] or items
+    top = sorted((item.importance for item in material), reverse=True)[:5]
     return max(0.0, min(1.0, sum(top) / len(top)))
 
 
@@ -1291,8 +1741,16 @@ def _month_item_from_row(row) -> MonthTimelineItem:
 def _timeline_qa_action(warnings: list[str]) -> str:
     if not warnings:
         return "ready"
-    if "fallback_heavy" in warnings or "too_few_thoughts" in warnings or "too_few_events" in warnings:
+    if (
+        "fallback_heavy" in warnings
+        or "too_few_thoughts" in warnings
+        or "too_few_events" in warnings
+        or "low_direct_thoughts" in warnings
+        or "low_direct_events" in warnings
+    ):
         return "analyze-all後にgenerate-timeline --forceを実行してください。"
+    if "suggestions_dominated" in warnings:
+        return "suggestions以外のthought/event/note summaryを増やしてから再生成してください。"
     if "evidence_missing" in warnings or "title_only_evidence" in warnings:
         return "元メモを確認し、evidenceの弱い抽出をレビューしてください。"
     return "Timeline detailで元メモを確認してください。"
@@ -1501,6 +1959,11 @@ def _normalize_month_key(value: str | None) -> str | None:
         month_value = int(match.group(2))
         return f"{match.group(1)}-{month_value:02d}" if 1 <= month_value <= 12 else None
     return None
+
+
+def _is_unknown_month(month: str) -> bool:
+    value = str(month or "").strip().lower()
+    return value in UNKNOWN_MONTHS or value.startswith("1900-")
 
 
 def _month_patterns(month: str) -> list[str]:

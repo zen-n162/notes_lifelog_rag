@@ -30,6 +30,7 @@ from notes_lifelog_rag.runtime.cuda import CudaStatus, collect_cuda_status
 from notes_lifelog_rag.runtime.device import DeviceInfo, DeviceResolutionError, effective_dtype, resolve_device
 from notes_lifelog_rag.search.hybrid import hybrid_search_notes
 from notes_lifelog_rag.timeline.service import (
+    TimelineBuildLimits,
     build_monthly_reflection,
     build_timeline,
     format_month_timeline_markdown,
@@ -865,6 +866,7 @@ def timeline_command(
     rich: Annotated[bool, typer.Option("--rich", help="Show the month snapshot instead of raw items.")] = False,
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
     limit: Annotated[int, typer.Option("--limit", help="Maximum timeline items.")] = 100,
+    include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if rich or monthly or all_months or year:
@@ -872,7 +874,13 @@ def timeline_command(
             snapshot = get_month_timeline_snapshot(month, db_path=db, generate_if_missing=True)
             console.print(format_month_timeline_markdown(snapshot) if snapshot else "Timeline snapshot not found.")
             return
-        snapshots = list_month_timeline_snapshots(year=year, db_path=db, order=order, limit=limit if limit else None)
+        snapshots = list_month_timeline_snapshots(
+            year=year,
+            db_path=db,
+            order=order,
+            limit=limit if limit else None,
+            include_unknown=include_unknown,
+        )
         console.print(format_timeline_report(snapshots, title=f"Timeline {year or 'All Months'}", order=order))
         return
     console.print(format_timeline_markdown(build_timeline(month, db_path=db, limit=limit), month=month))
@@ -881,9 +889,10 @@ def timeline_command(
 @app.command("timeline-months")
 def timeline_months_command(
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
+    include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
-    rows = list_timeline_months(db_path=db, order=order)
+    rows = list_timeline_months(db_path=db, order=order, include_unknown=include_unknown)
     table = Table(title="Timeline Months")
     table.add_column("Month")
     table.add_column("Notes", justify="right")
@@ -918,6 +927,12 @@ def generate_timeline_command(
     limit_months: Annotated[int | None, typer.Option("--limit-months", min=1, help="Limit month count.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Do not write timeline tables.")] = False,
     show_sources: Annotated[bool, typer.Option("--show-sources", help="Show source counts.")] = False,
+    include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Generate unknown-date months such as 1900-01.")] = False,
+    max_thoughts_per_month: Annotated[int, typer.Option("--max-thoughts-per-month", min=0, help="Maximum thought items per month.")] = 10,
+    max_events_per_month: Annotated[int, typer.Option("--max-events-per-month", min=0, help="Maximum event items per month.")] = 10,
+    max_summaries_per_month: Annotated[int, typer.Option("--max-summaries-per-month", min=0, help="Maximum note summary items per month.")] = 10,
+    max_suggestions_per_month: Annotated[int, typer.Option("--max-suggestions-per-month", min=0, help="Maximum suggestion items per month.")] = 5,
+    max_fallback_per_month: Annotated[int, typer.Option("--max-fallback-per-month", min=0, help="Maximum fallback title items per month.")] = 3,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if backend == "local":
@@ -926,7 +941,10 @@ def generate_timeline_command(
         console.print("[red]Specify --month or --all-months.[/red]")
         raise typer.Exit(code=1)
     months = [month] if month else None
-    rows = months or [row.month for row in list_timeline_months(db_path=db, order="desc")]
+    rows = months or [
+        row.month
+        for row in list_timeline_months(db_path=db, order="desc", include_unknown=include_unknown)
+    ]
     if limit_months:
         rows = rows[:limit_months]
     with Progress(
@@ -945,6 +963,14 @@ def generate_timeline_command(
             backend=backend,
             force=force,
             dry_run=dry_run,
+            include_unknown=include_unknown,
+            limits=TimelineBuildLimits(
+                max_thoughts=max_thoughts_per_month,
+                max_events=max_events_per_month,
+                max_summaries=max_summaries_per_month,
+                max_suggestions=max_suggestions_per_month,
+                max_fallback=max_fallback_per_month,
+            ),
             progress_callback=lambda done, total, label: _update_progress(progress, task_id, done, total, label),
         )
     table = Table(title="Generated Timeline Snapshots" + (" (dry-run)" if dry_run else ""))
@@ -975,12 +1001,18 @@ def timeline_report_command(
     all_years: Annotated[bool, typer.Option("--all-years", help="Include all years.")] = False,
     output: Annotated[Path, typer.Option("--output", help="Markdown output path.")] = Path("data/exports/timelines/timeline.md"),
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "asc",
+    include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if not year and not all_years:
         console.print("[red]Specify --year or --all-years.[/red]")
         raise typer.Exit(code=1)
-    snapshots = list_month_timeline_snapshots(year=None if all_years else year, db_path=db, order=order)
+    snapshots = list_month_timeline_snapshots(
+        year=None if all_years else year,
+        db_path=db,
+        order=order,
+        include_unknown=include_unknown,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         format_timeline_report(snapshots, title=f"Timeline {year or 'All Years'}", order=order),
@@ -993,12 +1025,13 @@ def timeline_report_command(
 def timeline_qa_command(
     month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
     all_months: Annotated[bool, typer.Option("--all-months", help="Check every month.")] = False,
+    include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if not month and not all_months:
         console.print("[red]Specify --month or --all-months.[/red]")
         raise typer.Exit(code=1)
-    rows = timeline_qa(month=month, all_months=all_months, db_path=db)
+    rows = timeline_qa(month=month, all_months=all_months, db_path=db, include_unknown=include_unknown)
     table = Table(title="Timeline QA")
     table.add_column("Month")
     table.add_column("Score", justify="right")

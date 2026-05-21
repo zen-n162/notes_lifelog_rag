@@ -290,6 +290,7 @@ python -m notes_lifelog_rag.cli timeline-months
 python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --dry-run
 python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule
 python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --force
+python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --force --show-sources
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
@@ -320,6 +321,33 @@ When running `--all-months`, generation continues month-by-month even if one
 month has malformed source data, and item IDs include the month so source items
 that appear in more than one month do not collide.
 
+Timeline month attribution deliberately avoids using a suggestion's
+`created_at`, because that is the date the recommendation was generated, not
+the date of the memory. The month decision now follows this order:
+
+- `thought`: `thoughts.date_start` / `date_label`, then evidence/source note
+  dates.
+- `event`: `events.date_start` / `date_label`, then evidence/source note dates.
+- `note_summary`: source note `created_at`, then `modified_at`.
+- `suggestion`: `target_date`, then evidence/source note dates. If `target_date`
+  looks like the generation day and no evidence/source date can be found, the
+  suggestion is excluded from Timeline.
+- `monthly_reflection`: the stored reflection month.
+
+Suggestions are supporting material, not the main source for a month. By
+default, month generation keeps at most 10 thoughts, 10 events, 10 summaries, 5
+suggestions, and 3 fallback items. You can tune this with
+`--max-thoughts-per-month`, `--max-events-per-month`,
+`--max-summaries-per-month`, `--max-suggestions-per-month`, and
+`--max-fallback-per-month`.
+
+Low priority items are kept visible for review but are not used to drive the
+month overview, thought summary, event summary, or title. Lyrics/music notes,
+shopping/menu notes, link-only notes, noisy PDF text, title-only evidence, very
+short summaries, weak confidence, and weak importance are marked as
+`low_priority`. In the GUI Timeline detail, these appear under **Low Priority /
+Needs Review** rather than **Main Timeline Items**.
+
 Use `timeline-months` to see month coverage and whether a saved snapshot exists.
 Use `timeline --month 2026-05 --rich` to read a rich month detail. Use
 `timeline --year 2026 --monthly --order asc` to browse a year in chronological
@@ -330,6 +358,23 @@ reasonable confidence, and whether the card is too fallback-heavy. A
 `fallback_heavy` warning means the month card is leaning on note summaries or
 titles because structured thoughts/events are sparse; run `analyze-all`, then
 regenerate the timeline with `generate-timeline --month YYYY-MM --force`.
+Other useful warnings:
+
+- `suggestions_dominated`: suggestions still outnumber direct thought/event/
+  summary material.
+- `low_direct_thoughts` / `low_direct_events`: the month needs more structured
+  analysis before "what I thought" or "what happened" can be trusted.
+- `noisy_items_present` / `low_value_items_present`: low priority notes are
+  present and should be reviewed separately.
+- `date_attribution_uncertain`: some items have weak or missing dates.
+- `generated_date_used_for_suggestion`: a suggestion looked tied to its
+  generated day and was treated cautiously.
+- `invalid_month_1900`: the month is an unknown-date fallback.
+
+`1900-01` is treated as an unknown-date bucket. It is hidden from
+`timeline-months`, `timeline --all-months`, reports, QA, and GUI month lists by
+default. Use `--include-unknown` when you intentionally want to inspect unknown
+dates.
 
 Timeline and reflection outputs include `evidence`, `confidence`, and
 `importance`, and keep source note IDs visible. Reflections prefer `thoughts`,

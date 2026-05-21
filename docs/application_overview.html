@@ -573,8 +573,10 @@ python -m notes_lifelog_rag.cli db-schema --table model_runs
 python -m notes_lifelog_rag.cli analyze-sample --task summary --backend local --device auto --max-new-tokens 1024 --show-raw-output
 python -m notes_lifelog_rag.cli search "研究"
 python -m notes_lifelog_rag.cli timeline-months
+python -m notes_lifelog_rag.cli timeline-months --include-unknown
 python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule
 python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --force
+python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --force --show-sources
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
@@ -598,6 +600,27 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             <code>--dry-run</code> ではDBを書き換えずプレビューできます。
             <code>fallback_heavy</code> warning は、thoughts/events が少なく note summary や title fallback に寄っている状態を示します。
             その場合は <code>analyze-all</code> 後に <code>generate-timeline --month YYYY-MM --force</code> で再生成します。
+          </p>
+          <p>
+            suggestion は Timeline の主素材ではなく補助素材です。月の帰属は
+            <code>created_at</code> ではなく <code>target_date</code>、evidence元noteの日付、
+            source noteの日付から決めます。生成日だけに見える suggestion は月カードから除外または低優先にし、
+            1ヶ月あたり最大5件に制限します。
+          </p>
+          <p>
+            歌詞、買い物、リンクだけのメモ、noisy PDF、title-only evidence、短すぎるsummary、
+            confidence/importance が低い項目は <code>low_priority</code> として扱い、
+            overview や「この月に考えていたこと」の中心素材には使いません。
+            GUIでは Main Timeline Items、Supporting Suggestions、Low Priority / Needs Review に分けて表示します。
+          </p>
+          <p>
+            <code>1900-01</code> は日付不明のfallback bucketとして扱い、通常の
+            <code>timeline-months</code> やGUI月一覧では非表示です。必要な場合だけ
+            <code>--include-unknown</code> で確認します。
+            主な quality warning は <code>suggestions_dominated</code>,
+            <code>low_direct_thoughts</code>, <code>low_direct_events</code>,
+            <code>noisy_items_present</code>, <code>low_value_items_present</code>,
+            <code>date_attribution_uncertain</code>, <code>invalid_month_1900</code> です。
           </p>
           <p>
             GUI の Timeline タブでは Year / Month / Category / Theme / Item type / Sort を選び、

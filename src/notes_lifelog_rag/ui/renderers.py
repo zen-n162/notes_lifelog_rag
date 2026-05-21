@@ -3,7 +3,12 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
-from notes_lifelog_rag.timeline.service import MonthTimelineSnapshot, ReflectionReport, TimelineItem
+from notes_lifelog_rag.timeline.service import (
+    MonthTimelineSnapshot,
+    ReflectionReport,
+    TimelineItem,
+    is_low_priority_timeline_item,
+)
 
 
 def render_sidebar(state: dict[str, Any], *, active_scope: str = "全ノート") -> str:
@@ -533,7 +538,20 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
     categories = "".join(f'<span class="note-badge important">{escape(cat)}</span>' for cat in snapshot.dominant_categories)
     changes = "".join(f"<li>{escape(item)}</li>" for item in snapshot.important_changes) or "<li>まだ十分な材料がありません。</li>"
     rediscovery = "".join(f"<li>{escape(item)}</li>" for item in snapshot.rediscovery_points + snapshot.revisit_reasons) or "<li>まだ十分な材料がありません。</li>"
-    item_cards = "".join(_render_month_timeline_item(item) for item in snapshot.items[:80])
+    main_items = [
+        item
+        for item in snapshot.items
+        if item.item_type != "suggestion" and not is_low_priority_timeline_item(item)
+    ]
+    suggestion_items = [
+        item
+        for item in snapshot.items
+        if item.item_type == "suggestion" and not is_low_priority_timeline_item(item)
+    ]
+    low_priority_items = [item for item in snapshot.items if is_low_priority_timeline_item(item)]
+    main_cards = "".join(_render_month_timeline_item(item) for item in main_items[:60])
+    suggestion_cards = "".join(_render_month_timeline_item(item) for item in suggestion_items[:20])
+    low_priority_cards = "".join(_render_month_timeline_item(item, low_priority=True) for item in low_priority_items[:40])
     return f"""
     <section class="detail-pane">
       <article class="paper">
@@ -567,19 +585,30 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
         </section>
         {render_evidence_card(snapshot.evidence)}
         <section class="paper-section">
-          <h2>関連メモ / Timeline Items</h2>
-          <p class="muted">カードのnote_idを確認し、必要に応じてNotes Workspaceや各レビュータブで元メモを開けます。</p>
-          {item_cards or render_empty_state("この月のitemsはまだありません。")}
+          <h2>Main Timeline Items</h2>
+          <p class="muted">thought / event / note summary を優先して構成した、この月の中心素材です。</p>
+          {main_cards or render_empty_state("この月の中心itemsはまだありません。")}
+        </section>
+        <section class="paper-section">
+          <h2>Supporting Suggestions</h2>
+          <p class="muted">suggestionsは補助素材として最大件数を絞り、overviewの中心には使いません。</p>
+          {suggestion_cards or render_empty_state("この月に紐づくsupporting suggestionsはありません。")}
+        </section>
+        <section class="paper-section">
+          <h2>Low Priority / Needs Review</h2>
+          <p class="muted">歌詞、買い物、PDFノイズ、title-only evidenceなど、月の意味を歪めやすい候補です。</p>
+          {low_priority_cards or render_empty_state("低優先レビュー候補はありません。")}
         </section>
       </article>
     </section>
     """
 
 
-def _render_month_timeline_item(item) -> str:
+def _render_month_timeline_item(item, *, low_priority: bool = False) -> str:
     badges = "".join(f'<span class="note-badge">{escape(value)}</span>' for value in (item.categories + item.themes)[:5])
+    extra_class = " low-priority" if low_priority else ""
     return f"""
-    <article class="event-card month-item-card">
+    <article class="event-card month-item-card{extra_class}">
       <div class="section-title-row">
         <h3>{escape(item.date_label or "日付不明")} · {escape(item.title)}</h3>
         <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
