@@ -579,9 +579,10 @@ python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --
 python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --force --show-sources
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
-python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich --show-low-priority
+python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich --low-priority-limit 3
+python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich --ungrouped --show-low-priority
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
-python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
+python -m notes_lifelog_rag.cli timeline-report --year 2026 --grouped --low-priority-limit 3 --output data/exports/timelines/timeline_2026.md
 python -m notes_lifelog_rag.cli timeline-qa --all-months
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items
 python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems
@@ -626,13 +627,32 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             GUIでは Main Timeline Items、Supporting Suggestions、Low Priority / Needs Review に分けて表示します。
             Main Timeline Items は direct thoughts/events と高品質 summaries を中心にし、
             direct thoughts/events がある月では <code>thought_summary</code> / <code>event_summary</code> に必ず具体項目を反映します。
-            CLI の <code>timeline --rich</code> は Low Priority を最大5件だけ表示し、
-            <code>--show-low-priority</code> で全件、<code>--hide-low-priority</code> で非表示にできます。
+            CLI の <code>timeline --rich</code> は Low Priority を最大3件だけ表示し、
+            <code>--low-priority-limit N</code> で件数変更、<code>--show-low-priority</code> で全件、
+            <code>--hide-low-priority</code> で非表示にできます。
+          </p>
+          <p>
+            rich output と timeline report は grouped view をデフォルトにしています。
+            同じ <code>source_note_id</code> から出た複数itemは代表カードに統合され、
+            <code>sub_items</code> として保持されます。QST ES のように
+            <code>QST ES</code>、<code>自己PR</code>、<code>志望動機</code>、<code>趣味</code>、<code>特技</code>
+            が同じnoteから出た場合、表示上は「QST ES・自己PR・志望動機の整理」のような1枚の記憶カードになります。
+            生の抽出itemを確認したい場合だけ <code>--ungrouped</code> またはGUIの
+            “show ungrouped items” を使います。
+          </p>
+          <p>
+            Low Priority item には <code>quality_flags_json</code> を保存し、
+            <code>noisy_pdf</code>、<code>scanned_document</code>、<code>mojibake</code>、
+            <code>low_confidence</code>、<code>low_importance</code>、
+            <code>weak_evidence</code>、<code>section_fragment</code>、
+            <code>duplicate_same_note</code>、<code>date_uncertain</code> などの理由を表示します。
           </p>
           <p>
             evidence が <code># QST ES</code> のようなタイトルだけの場合は、元メモ本文から
             100〜180文字程度の短いquoteを補完し、<code>evidence_enriched</code> として扱います。
             それでも <code>title_only_evidence</code> が残る場合は、元メモ本文から十分な根拠quoteを取れなかったことを示します。
+            月overview / thought_summary / event_summary は、grouped main items と themes から
+            local rule-based summarizer が短い日本語文として作り、raw evidence quote は根拠欄に分離します。
             2026-05 のような月では、QST ES、研究計画、機械学習、月面探査、公共性の高い研究支援が
             direct source としてどう結びつくかを読み、Low Priority のPDF/scan/noisy itemは別枠で確認します。
           </p>

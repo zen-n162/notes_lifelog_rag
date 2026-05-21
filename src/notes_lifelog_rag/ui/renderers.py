@@ -530,7 +530,7 @@ def render_timeline_month_cards(
     return '<section class="note-list timeline-month-list">' + "".join(cards) + "</section>"
 
 
-def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
+def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None, *, grouped: bool = True) -> str:
     if snapshot is None:
         return render_empty_state("月を選択してください。")
     warnings = "".join(render_warning_banner(str(item)) for item in (snapshot.quality.get("warnings") or [])[:5])
@@ -538,7 +538,7 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
     categories = "".join(f'<span class="note-badge important">{escape(cat)}</span>' for cat in snapshot.dominant_categories)
     changes = "".join(f"<li>{escape(item)}</li>" for item in snapshot.important_changes) or "<li>まだ十分な材料がありません。</li>"
     rediscovery = "".join(f"<li>{escape(item)}</li>" for item in snapshot.rediscovery_points + snapshot.revisit_reasons) or "<li>まだ十分な材料がありません。</li>"
-    groups = timeline_item_display_groups(snapshot.items)
+    groups = timeline_item_display_groups(snapshot.items, grouped=grouped)
     main_items = groups["main"]
     suggestion_items = groups["suggestions"]
     low_priority_items = groups["low_priority"]
@@ -546,12 +546,13 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
     suggestion_cards = "".join(_render_month_timeline_item(item) for item in suggestion_items[:20])
     low_priority_cards = "".join(_render_month_timeline_item(item, low_priority=True) for item in low_priority_items[:40])
     low_priority_summary = f"{len(low_priority_items)} low priority / needs review items"
+    mode_badge = "Grouped view" if grouped else "Ungrouped raw items"
     return f"""
     <section class="detail-pane">
       <article class="paper">
         <div class="paper-kicker">Monthly Timeline Snapshot</div>
         <h1 class="paper-title">{escape(snapshot.month)} · {escape(snapshot.title)}</h1>
-        <div class="metric-row">{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}<span class="score-pill">quality {float(snapshot.quality.get("quality_score") or 0.0):.2f}</span></div>
+        <div class="metric-row">{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}<span class="score-pill">quality {float(snapshot.quality.get("quality_score") or 0.0):.2f}</span><span class="score-pill">{escape(mode_badge)}</span></div>
         {warnings}
         <section class="ai-summary-card">
           <h2>この月の概要</h2>
@@ -600,8 +601,11 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
 
 def _render_month_timeline_item(item, *, low_priority: bool = False) -> str:
     badges = "".join(f'<span class="note-badge">{escape(value)}</span>' for value in (item.categories + item.themes)[:5])
+    flag_badges = "".join(f'<span class="note-badge review">{escape(value)}</span>' for value in getattr(item, "quality_flags", [])[:6])
     extra_class = " low-priority" if low_priority else ""
     summary = _timeline_item_summary(item)
+    sub_count = len(getattr(item, "sub_items", []) or [])
+    sub_meta = f"<span>sub items {sub_count}</span>" if sub_count else ""
     return f"""
     <article class="event-card month-item-card{extra_class}">
       <div class="section-title-row">
@@ -610,7 +614,8 @@ def _render_month_timeline_item(item, *, low_priority: bool = False) -> str:
       </div>
       <p>{escape(summary)}</p>
       <div class="badge-row"><span class="note-badge important">{escape(item.item_type)}</span>{badges}</div>
-      <div class="note-meta"><span>{escape(item.source_note_id[:12])}</span><span>{escape(item.source_table)}</span></div>
+      <div class="badge-row">{flag_badges}</div>
+      <div class="note-meta"><span>{escape(item.source_note_id[:12])}</span><span>{escape(item.source_table)}</span>{sub_meta}</div>
       {render_evidence_card(item.evidence)}
     </article>
     """

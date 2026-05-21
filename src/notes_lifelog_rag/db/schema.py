@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS monthly_timeline_items (
     date_source TEXT,
     date_quality TEXT,
     evidence_enriched INTEGER DEFAULT 0,
+    quality_flags_json TEXT,
     sort_key TEXT,
     created_at TEXT
 );
@@ -306,6 +307,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "monthly_timeline_items", "date_source", "TEXT")
     _add_column_if_missing(conn, "monthly_timeline_items", "date_quality", "TEXT")
     _add_column_if_missing(conn, "monthly_timeline_items", "evidence_enriched", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "monthly_timeline_items", "quality_flags_json", "TEXT")
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

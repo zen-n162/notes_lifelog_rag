@@ -18,6 +18,7 @@ from notes_lifelog_rag.timeline.service import (
     get_month_sources,
     list_timeline_months,
     timeline_qa,
+    timeline_item_display_groups,
 )
 
 
@@ -381,12 +382,143 @@ def test_direct_thoughts_events_and_enriched_evidence_drive_month_summary(tmp_pa
 
     assert "thought抽出はまだ少ないため" not in snapshot.thought_summary
     assert "宇宙データ" in snapshot.thought_summary
-    assert "QST ES整理" in snapshot.event_summary
+    assert "QST ES" in snapshot.event_summary
     assert any(item.item_type == "thought" for item in main_items)
     assert any(item.item_type == "event" for item in main_items)
     assert any(item.evidence_enriched for item in snapshot.items)
     assert "title_only_evidence" not in set(snapshot.quality["warnings"])
     assert "date_attribution_uncertain" not in set(snapshot.quality["warnings"])
+
+
+def test_grouped_timeline_merges_same_note_sections_and_preserves_sub_items(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(
+            conn,
+            "qst-note",
+            "QST ES",
+            created_at="2026-05-03",
+            body="QST ESでは、研究経験と自己PR、志望動機を整理した。公共性の高い研究支援に関心がある。",
+        )
+        _insert_summary(
+            conn,
+            "qst-note",
+            generated_title="QST ES",
+            one_line_summary="研究経験をQSTでの公共性の高い研究支援に接続するメモ。",
+            importance=0.9,
+        )
+        for title in ["自己PR", "志望動機", "趣味"]:
+            conn.execute(
+                """
+                INSERT INTO events(
+                    note_id, title, summary, event_type, event_date, date_label,
+                    date_confidence, importance, confidence, evidence_json, created_at
+                )
+                VALUES (?, ?, ?, 'section', '2026-05-03', '2026-05-03', 'high', 0.15, 0.2, ?, '2026-05-03')
+                """,
+                (
+                    "qst-note",
+                    title,
+                    f"QST ES内の{title}セクション。",
+                    json.dumps([{"note_id": "qst-note", "quote": title}]),
+                ),
+            )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    groups = timeline_item_display_groups(snapshot.items)
+    qst_group = next(item for item in groups["main"] if "QST ES" in item.title)
+
+    assert qst_group.title == "QST ES・自己PR・志望動機の整理"
+    assert len(qst_group.sub_items) >= 3
+    assert "duplicate_same_note" in qst_group.quality_flags
+    assert not any(item.title in {"自己PR", "志望動機", "趣味"} for item in groups["low_priority"])
+
+
+def test_natural_narrative_avoids_long_raw_truncated_quotes(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    long_body = "QST ESでは、宇宙データを対象にした機械学習経験を公共性の高い研究支援へ接続する方針を整理した。" * 8
+    with connect(db_path) as conn:
+        _insert_note(conn, "qst-note", "QST ES", created_at="2026-05-03", body=long_body)
+        _insert_summary(
+            conn,
+            "qst-note",
+            generated_title="QST ES",
+            one_line_summary=long_body,
+            source_quote="# QST ES",
+            importance=0.9,
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+
+    assert "…" not in snapshot.overview
+    assert "…" not in snapshot.thought_summary
+    assert long_body[:180] not in snapshot.overview
+    assert "社会的意義のあるAI活用" in snapshot.overview
+
+
+def test_low_priority_reason_flags_and_default_limit_three(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        for index in range(6):
+            note_id = f"scan-{index}"
+            _insert_note(conn, note_id, f"スキャンPDF {index}", created_at="2026-05-01", source_path=f"scan-{index}.pdf")
+            _insert_summary(
+                conn,
+                note_id,
+                generated_title=f"スキャンPDF {index}",
+                one_line_summary=f"｜｜｜ ノイズ断片 {index}",
+                importance=0.8,
+            )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    groups = timeline_item_display_groups(snapshot.items)
+    assert groups["low_priority"]
+    assert {"noisy_pdf", "scanned_document"} & set(groups["low_priority"][0].quality_flags)
+    default_md = format_month_timeline_markdown(snapshot)
+    full_md = format_month_timeline_markdown(snapshot, show_low_priority=True)
+
+    assert "... (+" in default_md
+    assert "スキャンPDF 5" not in default_md
+    assert "スキャンPDF 5" in full_md
+
+
+def test_timeline_report_uses_grouped_view_by_default(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "qst-note", "QST ES", created_at="2026-05-03")
+        _insert_summary(
+            conn,
+            "qst-note",
+            generated_title="QST ES",
+            one_line_summary="研究経験を志望動機に整理するメモ。",
+            importance=0.9,
+        )
+        conn.execute(
+            """
+            INSERT INTO events(
+                note_id, title, summary, event_type, event_date, date_label,
+                date_confidence, importance, confidence, evidence_json, created_at
+            )
+            VALUES ('qst-note', '自己PR', '自己PRを整理した。', 'section', '2026-05-03', '2026-05-03', 'high', 0.15, 0.2,
+                    '[{"note_id":"qst-note","quote":"自己PR"}]', '2026-05-03')
+            """
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    grouped_report = format_timeline_report([snapshot], title="Timeline 2026")
+    ungrouped_report = format_timeline_report([snapshot], title="Timeline 2026", grouped=False, show_low_priority=True)
+
+    assert "QST ES・自己PR・志望動機の整理" in grouped_report
+    assert "sub_items:" in grouped_report
+    assert "自己PR" in ungrouped_report
 
 
 def test_unknown_month_triggers_date_warning(tmp_path: Path) -> None:

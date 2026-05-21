@@ -867,10 +867,14 @@ def timeline_command(
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
     limit: Annotated[int, typer.Option("--limit", help="Maximum timeline items.")] = 100,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    grouped_flag: Annotated[bool, typer.Option("--grouped", help="Use grouped monthly items in rich output.")] = False,
+    ungrouped: Annotated[bool, typer.Option("--ungrouped", help="Show raw ungrouped timeline items in rich output.")] = False,
     show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in rich output.")] = False,
     hide_low_priority: Annotated[bool, typer.Option("--hide-low-priority", help="Hide low priority timeline items in rich output.")] = False,
+    low_priority_limit: Annotated[int, typer.Option("--low-priority-limit", min=0, help="Low priority item count in rich grouped output.")] = 3,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
+    use_grouped = grouped_flag or not ungrouped
     if rich or monthly or all_months or year:
         if month and not monthly and not all_months:
             snapshot = get_month_timeline_snapshot(month, db_path=db, generate_if_missing=True)
@@ -879,6 +883,8 @@ def timeline_command(
                     snapshot,
                     show_low_priority=show_low_priority,
                     hide_low_priority=hide_low_priority,
+                    grouped=use_grouped,
+                    low_priority_limit=low_priority_limit,
                 )
                 if snapshot
                 else "Timeline snapshot not found."
@@ -891,7 +897,17 @@ def timeline_command(
             limit=limit if limit else None,
             include_unknown=include_unknown,
         )
-        console.print(format_timeline_report(snapshots, title=f"Timeline {year or 'All Months'}", order=order))
+        console.print(
+            format_timeline_report(
+                snapshots,
+                title=f"Timeline {year or 'All Months'}",
+                order=order,
+                grouped=use_grouped,
+                show_low_priority=show_low_priority,
+                hide_low_priority=hide_low_priority,
+                low_priority_limit=low_priority_limit,
+            )
+        )
         return
     console.print(format_timeline_markdown(build_timeline(month, db_path=db, limit=limit), month=month))
 
@@ -1012,8 +1028,14 @@ def timeline_report_command(
     output: Annotated[Path, typer.Option("--output", help="Markdown output path.")] = Path("data/exports/timelines/timeline.md"),
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "asc",
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    grouped_flag: Annotated[bool, typer.Option("--grouped", help="Use grouped monthly items in report output.")] = False,
+    ungrouped: Annotated[bool, typer.Option("--ungrouped", help="Use raw ungrouped timeline items in report output.")] = False,
+    show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in report output.")] = False,
+    hide_low_priority: Annotated[bool, typer.Option("--hide-low-priority", help="Hide low priority timeline items in report output.")] = False,
+    low_priority_limit: Annotated[int, typer.Option("--low-priority-limit", min=0, help="Low priority item count in grouped report output.")] = 3,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
+    use_grouped = grouped_flag or not ungrouped
     if not year and not all_years:
         console.print("[red]Specify --year or --all-years.[/red]")
         raise typer.Exit(code=1)
@@ -1025,7 +1047,15 @@ def timeline_report_command(
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        format_timeline_report(snapshots, title=f"Timeline {year or 'All Years'}", order=order),
+        format_timeline_report(
+            snapshots,
+            title=f"Timeline {year or 'All Years'}",
+            order=order,
+            grouped=use_grouped,
+            show_low_priority=show_low_priority,
+            hide_low_priority=hide_low_priority,
+            low_priority_limit=low_priority_limit,
+        ),
         encoding="utf-8",
     )
     console.print(f"[green]Wrote timeline report:[/green] {output}")

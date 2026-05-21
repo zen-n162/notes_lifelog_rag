@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from collections import Counter
 import hashlib
@@ -10,6 +10,14 @@ import re
 from typing import Any
 
 from notes_lifelog_rag.db.schema import connect, init_db
+from notes_lifelog_rag.timeline.month_narrative import (
+    build_important_changes as build_narrative_important_changes,
+    build_month_event_summary,
+    build_month_overview,
+    build_month_thought_summary,
+    build_revisit_reasons as build_narrative_revisit_reasons,
+    summarize_grouped_item,
+)
 
 
 @dataclass(frozen=True)
@@ -84,8 +92,34 @@ class MonthTimelineItem:
     date_source: str
     date_quality: str
     evidence_enriched: bool
+    quality_flags: list[str]
     sort_key: str
     created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TimelineDisplayItem:
+    id: str
+    month: str
+    date_label: str
+    item_type: str
+    title: str
+    summary: str
+    detail: str
+    themes: list[str]
+    categories: list[str]
+    evidence: list[dict[str, str]]
+    source_table: str
+    source_note_id: str
+    confidence: float
+    importance: float
+    sort_key: str
+    quality_flags: list[str]
+    grouped_item_ids: list[str]
+    sub_items: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -534,17 +568,25 @@ def generate_month_timeline_snapshot(
     now = datetime.now(tz=timezone.utc).isoformat()
     title = _month_title(selected_month, sources, items)
     quality = _timeline_quality(sources, items)
+    key_themes = _key_themes(sources, items)
+    display_groups = timeline_item_display_groups(items, grouped=True)
+    narrative_items = display_groups["main"]
+    overview = build_month_overview(selected_month, narrative_items, key_themes, source_counts, quality.get("warnings") or [])
+    thought_summary = build_month_thought_summary(narrative_items, key_themes, source_counts)
+    event_summary = build_month_event_summary(narrative_items, key_themes, source_counts)
+    important_changes = build_narrative_important_changes(narrative_items) or _important_timeline_changes(items)
+    rediscovery_points = build_narrative_revisit_reasons(narrative_items) or _timeline_rediscovery_points(items)
     snapshot = MonthTimelineSnapshot(
         id=_stable_id("monthly_timeline_snapshot", selected_month, source_hash),
         month=selected_month,
         title=title,
-        overview=_month_overview(selected_month, sources, items, title),
-        thought_summary=_thought_summary(sources, items),
-        event_summary=_event_summary(sources, items),
-        important_changes=_important_timeline_changes(items),
-        key_themes=_key_themes(sources, items),
+        overview=overview,
+        thought_summary=thought_summary,
+        event_summary=event_summary,
+        important_changes=important_changes,
+        key_themes=key_themes,
         dominant_categories=_dominant_categories(sources),
-        rediscovery_points=_timeline_rediscovery_points(items),
+        rediscovery_points=rediscovery_points,
         revisit_reasons=_revisit_reasons(sources, items),
         evidence=_timeline_evidence(items),
         quality=quality,
@@ -667,6 +709,8 @@ def format_month_timeline_markdown(
     *,
     show_low_priority: bool = False,
     hide_low_priority: bool = False,
+    grouped: bool = True,
+    low_priority_limit: int = 3,
 ) -> str:
     theme_lines = [f"- {theme}" for theme in snapshot.key_themes] or ["- まだ十分なテーマがありません。"]
     change_lines = [f"- {item}" for item in snapshot.important_changes] or ["- まだ十分な材料がありません。"]
@@ -698,20 +742,23 @@ def format_month_timeline_markdown(
     warnings = snapshot.quality.get("warnings") or []
     if warnings:
         lines.extend(["", "### Quality Warnings", *[f"- {warning}" for warning in warnings]])
-    def append_item_section(title: str, values: list[MonthTimelineItem], max_count: int) -> None:
+    def append_item_section(title: str, values: list[TimelineDisplayItem], max_count: int) -> None:
         lines.extend(["", f"### {title}"])
         if not values:
             lines.append("- なし")
             return
         for item in sorted(values, key=lambda row: row.sort_key)[:max_count]:
+            flags = f" / flags: {', '.join(item.quality_flags)}" if item.quality_flags else ""
+            sub_items = f" / sub_items: {len(item.sub_items)}" if item.sub_items else ""
             lines.append(
                 f"- {item.date_label or '日付不明'} [{item.item_type}] "
-                f"{_short(item.title, 80)}: {_item_narrative(item, 140)} (`{item.source_note_id[:12]}`)"
+                f"{_short(item.title, 80)}: {_short(item.summary, 140)} "
+                f"(`{item.source_note_id[:12]}`){sub_items}{flags}"
             )
         if len(values) > max_count:
             lines.append(f"- ... (+{len(values) - max_count} more items; open the GUI Timeline tab for detail)")
 
-    groups = timeline_item_display_groups(snapshot.items)
+    groups = timeline_item_display_groups(snapshot.items, grouped=grouped)
     main_items = groups["main"]
     suggestion_items = groups["suggestions"]
     low_priority_items = groups["low_priority"]
@@ -722,7 +769,7 @@ def format_month_timeline_markdown(
     elif show_low_priority:
         append_item_section("Low Priority / Needs Review", low_priority_items, max(len(low_priority_items), 1))
     else:
-        append_item_section("Low Priority / Needs Review", low_priority_items, 5)
+        append_item_section("Low Priority / Needs Review", low_priority_items, max(0, int(low_priority_limit)))
     return "\n".join(lines)
 
 
@@ -731,11 +778,23 @@ def format_timeline_report(
     *,
     title: str = "Timeline Report",
     order: str = "asc",
+    grouped: bool = True,
+    show_low_priority: bool = False,
+    hide_low_priority: bool = False,
+    low_priority_limit: int = 3,
 ) -> str:
     values = sorted(snapshots, key=lambda item: item.month, reverse=(order == "desc"))
     lines = [f"# {title}", ""]
     for snapshot in values:
-        lines.append(format_month_timeline_markdown(snapshot))
+        lines.append(
+            format_month_timeline_markdown(
+                snapshot,
+                grouped=grouped,
+                show_low_priority=show_low_priority,
+                hide_low_priority=hide_low_priority,
+                low_priority_limit=low_priority_limit,
+            )
+        )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -789,14 +848,17 @@ def timeline_qa(
             "recommended_action": _timeline_qa_action(warnings, snapshot=snapshot),
         }
         if show_items:
+            display_groups = timeline_item_display_groups(snapshot.items, grouped=True)
+            display_items = display_groups["main"] + display_groups["suggestions"] + display_groups["low_priority"]
             qa_row["items"] = [
                 {
                     "type": item.item_type,
                     "title": _short(item.title, 60),
-                    "quality": "low_priority" if _is_low_priority_item(item) else "main",
-                    "date_source": item.date_source or "unknown",
+                    "quality": "low_priority" if item in display_groups["low_priority"] else "main",
+                    "quality_flags": item.quality_flags,
+                    "sub_items": len(item.sub_items),
                 }
-                for item in snapshot.items[:20]
+                for item in display_items[:20]
             ]
         rows.append(qa_row)
     return rows
@@ -1056,6 +1118,7 @@ def _build_month_timeline_items_from_sources(
                 date_source=str(date_source),
                 date_quality=str(date_quality),
                 evidence_enriched=evidence_enriched,
+                quality_flags=[],
                 sort_key=_sort_key(date_value, "event", row.get("id")),
                 created_at=now,
             )
@@ -1104,6 +1167,7 @@ def _build_month_timeline_items_from_sources(
                 date_source=str(date_source),
                 date_quality=str(date_quality),
                 evidence_enriched=evidence_enriched,
+                quality_flags=[],
                 sort_key=_sort_key(date_value, "thought", row.get("id")),
                 created_at=now,
             )
@@ -1156,6 +1220,7 @@ def _build_month_timeline_items_from_sources(
                 date_source=str(date_source),
                 date_quality=str(date_quality),
                 evidence_enriched=evidence_enriched,
+                quality_flags=[],
                 sort_key=_sort_key(date_value, "note_summary", row.get("id")),
                 created_at=now,
             )
@@ -1208,6 +1273,7 @@ def _build_month_timeline_items_from_sources(
                 date_source=str(date_source),
                 date_quality=str(date_quality),
                 evidence_enriched=evidence_enriched,
+                quality_flags=[],
                 sort_key=_sort_key(date_value, "suggestion", row.get("id")),
                 created_at=now,
             )
@@ -1219,6 +1285,8 @@ def _build_month_timeline_items_from_sources(
         + _select_limited_items(by_type["suggestion"], limits.max_suggestions)
         + _select_limited_items(by_type["fallback"], limits.max_fallback)
     )
+    source_counts = Counter(item.source_note_id for item in selected if item.source_note_id)
+    selected = [_with_quality_flags(item, source_counts=source_counts) for item in selected]
     return sorted(selected, key=lambda item: (item.sort_key, _item_type_rank(item.item_type), _is_low_priority_item(item), -item.importance))
 
 
@@ -1538,32 +1606,258 @@ def _is_low_priority_item(item: MonthTimelineItem) -> bool:
     return LOW_PRIORITY_TAG in item.categories or any(str(value).startswith("quality:") for value in item.categories)
 
 
+def _with_quality_flags(item: MonthTimelineItem, *, source_counts: Counter[str]) -> MonthTimelineItem:
+    flags = _quality_flags_for_item(item)
+    if item.source_note_id and source_counts.get(item.source_note_id, 0) > 1:
+        flags.append("duplicate_same_note")
+    if _is_section_fragment(item):
+        flags.append("section_fragment")
+    return replace(item, quality_flags=sorted(set(flags)))
+
+
+def _quality_flags_for_item(item: MonthTimelineItem) -> list[str]:
+    raw_flags = {str(value).removeprefix("quality:") for value in item.categories if str(value).startswith("quality:")}
+    flags: list[str] = []
+    mapping = {
+        "noisy_pdf_or_text": ["noisy_pdf"],
+        "shopping_or_menu": ["shopping_list"],
+        "lyric_or_music": ["lyric_or_song"],
+        "title_only_evidence": ["title_only_evidence", "weak_evidence"],
+        "very_short_summary": ["weak_evidence"],
+        "link_only": ["weak_evidence"],
+        "only_other_category": ["low_importance"],
+        "generated_date_used_for_suggestion": ["date_uncertain"],
+    }
+    for raw in raw_flags:
+        flags.extend(mapping.get(raw, [raw]))
+    text = f"{item.title}\n{item.summary}\n{item.detail}".lower()
+    if any(token in text for token in ["スキャン", "scanner", "scanner pro"]):
+        flags.append("scanned_document")
+    if _looks_noisy(item.summary) or any(_looks_noisy(str(row.get("quote") or "")) for row in item.evidence):
+        flags.append("mojibake")
+    if item.confidence < 0.35:
+        flags.append("low_confidence")
+    if item.importance < 0.25:
+        flags.append("low_importance")
+    if not item.evidence or all(not str(row.get("quote") or "").strip() for row in item.evidence):
+        flags.append("weak_evidence")
+    if item.date_source == "unknown" or item.date_quality == "low":
+        flags.append("date_uncertain")
+    return sorted(set(flags))
+
+
+def _is_section_fragment(item: MonthTimelineItem) -> bool:
+    title = str(item.title or "").strip()
+    section_titles = {"趣味", "特技", "自己PR", "志望動機", "強み", "弱み", "ガクチカ"}
+    return title in section_titles or any(title.startswith(f"{prefix}（") for prefix in section_titles)
+
+
 def is_low_priority_timeline_item(item: MonthTimelineItem) -> bool:
     return _is_low_priority_item(item)
 
 
-def timeline_item_display_groups(items: list[MonthTimelineItem]) -> dict[str, list[MonthTimelineItem]]:
+def timeline_item_display_groups(
+    items: list[MonthTimelineItem],
+    *,
+    grouped: bool = True,
+) -> dict[str, list[TimelineDisplayItem]]:
     main = _main_material_items(items)
     main_ids = {item.id for item in main}
-    suggestions = [
+    main_source_ids = {item.source_note_id for item in main if item.source_note_id}
+    consumed_ids: set[str] = set()
+
+    if grouped:
+        main_groups: list[TimelineDisplayItem] = []
+        for source_note_id in sorted(main_source_ids, key=lambda note_id: _source_sort_key(note_id, items)):
+            group_items = [
+                item
+                for item in items
+                if item.source_note_id == source_note_id
+                and item.item_type != "suggestion"
+                and not _has_severe_quality_flag(item)
+            ]
+            group_items = group_items or [item for item in main if item.source_note_id == source_note_id]
+            main_groups.append(_display_group_from_items(group_items))
+            consumed_ids.update(item.id for item in group_items)
+        for item in main:
+            if item.id not in consumed_ids:
+                main_groups.append(_display_item_from_raw(item))
+                consumed_ids.add(item.id)
+        main_display = sorted(main_groups, key=lambda item: item.sort_key)
+    else:
+        main_display = [_display_item_from_raw(item) for item in main]
+        consumed_ids.update(item.id for item in main)
+
+    suggestion_raw = [
         item
         for item in items
-        if item.item_type == "suggestion" and item.id not in main_ids and not _is_low_priority_item(item)
+        if item.item_type == "suggestion" and item.id not in consumed_ids and not _is_low_priority_item(item)
     ]
-    low_priority = [
+    low_raw = [
         item
         for item in items
-        if item.id not in main_ids and item.item_type != "suggestion"
+        if item.id not in consumed_ids and item.item_type != "suggestion"
     ] + [
         item
         for item in items
         if item.item_type == "suggestion" and _is_low_priority_item(item)
     ]
+    if grouped:
+        suggestions = _group_display_items(suggestion_raw)
+        low_priority = _group_display_items(low_raw)
+    else:
+        suggestions = [_display_item_from_raw(item) for item in suggestion_raw]
+        low_priority = [_display_item_from_raw(item) for item in low_raw]
     return {
-        "main": main,
+        "main": main_display,
         "suggestions": suggestions,
         "low_priority": low_priority,
     }
+
+
+def _group_display_items(items: list[MonthTimelineItem]) -> list[TimelineDisplayItem]:
+    grouped: list[TimelineDisplayItem] = []
+    by_source: dict[str, list[MonthTimelineItem]] = {}
+    for item in items:
+        by_source.setdefault(item.source_note_id or item.id, []).append(item)
+    for values in by_source.values():
+        grouped.append(_display_group_from_items(values) if len(values) > 1 else _display_item_from_raw(values[0]))
+    return sorted(grouped, key=lambda item: item.sort_key)
+
+
+def _display_group_from_items(items: list[MonthTimelineItem]) -> TimelineDisplayItem:
+    values = sorted(items, key=lambda item: (_group_primary_rank(item), -item.importance, -item.confidence, item.sort_key))
+    primary = values[0]
+    title = _group_title(primary, values)
+    flags = sorted(set(flag for item in values for flag in _display_quality_flags(item)) | {"duplicate_same_note"})
+    sub_items = [_sub_item_dict(item) for item in values]
+    return TimelineDisplayItem(
+        id=_stable_id("grouped_timeline_item", primary.month, primary.source_note_id or primary.id, ",".join(item.id for item in values)),
+        month=primary.month,
+        date_label=_display_group_date(values),
+        item_type="grouped_note" if len(values) > 1 else primary.item_type,
+        title=title,
+        summary=summarize_grouped_item(values, title),
+        detail=" / ".join(_short(item.title, 40) for item in values if item.title),
+        themes=_dedupe_str_list([theme for item in values for theme in item.themes]),
+        categories=_clean_display_categories([category for item in values for category in item.categories]),
+        evidence=_dedupe_evidence([row for item in values for row in item.evidence])[:4],
+        source_table="grouped" if len(values) > 1 else primary.source_table,
+        source_note_id=primary.source_note_id,
+        confidence=_average([item.confidence for item in values], default=primary.confidence),
+        importance=max([item.importance for item in values] or [primary.importance]),
+        sort_key=min((item.sort_key for item in values if item.sort_key), default=primary.sort_key),
+        quality_flags=flags,
+        grouped_item_ids=[item.id for item in values],
+        sub_items=sub_items if len(values) > 1 else [],
+    )
+
+
+def _display_item_from_raw(item: MonthTimelineItem) -> TimelineDisplayItem:
+    return TimelineDisplayItem(
+        id=item.id,
+        month=item.month,
+        date_label=item.date_label,
+        item_type=item.item_type,
+        title=item.title,
+        summary=_item_narrative(item, 180),
+        detail=item.detail,
+        themes=item.themes,
+        categories=_clean_display_categories(item.categories),
+        evidence=item.evidence,
+        source_table=item.source_table,
+        source_note_id=item.source_note_id,
+        confidence=item.confidence,
+        importance=item.importance,
+        sort_key=item.sort_key,
+        quality_flags=_display_quality_flags(item),
+        grouped_item_ids=[item.id],
+        sub_items=[],
+    )
+
+
+def _sub_item_dict(item: MonthTimelineItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "item_type": item.item_type,
+        "title": item.title,
+        "summary": _item_narrative(item, 140),
+        "quality_flags": _display_quality_flags(item),
+        "confidence": item.confidence,
+        "importance": item.importance,
+    }
+
+
+def _group_title(primary: MonthTimelineItem, items: list[MonthTimelineItem]) -> str:
+    text = "\n".join([primary.title, primary.summary] + [item.title for item in items])
+    if "QST" in text and any(token in text for token in ["自己PR", "志望動機", "ES"]):
+        return "QST ES・自己PR・志望動機の整理"
+    if len(items) > 1 and primary.title:
+        return primary.title
+    return primary.title or "Grouped timeline item"
+
+
+def _group_primary_rank(item: MonthTimelineItem) -> int:
+    if item.item_type == "note_summary" and not _is_low_priority_item(item):
+        return 0
+    if item.item_type == "thought" and not _is_low_priority_item(item):
+        return 1
+    if item.item_type == "event" and not _is_low_priority_item(item):
+        return 2
+    if item.item_type == "note_summary":
+        return 3
+    if item.item_type == "thought":
+        return 4
+    return 5
+
+
+def _source_sort_key(source_note_id: str, items: list[MonthTimelineItem]) -> str:
+    return min((item.sort_key for item in items if item.source_note_id == source_note_id), default="")
+
+
+def _display_group_date(items: list[MonthTimelineItem]) -> str:
+    dated = [item.date_label for item in items if item.date_label and item.date_label != "日付不明"]
+    return dated[0] if dated else "日付不明"
+
+
+def _has_severe_quality_flag(item: MonthTimelineItem) -> bool:
+    severe = {"noisy_pdf", "mojibake", "scanned_document", "lyric_or_song", "shopping_list"}
+    return bool(set(_display_quality_flags(item)) & severe)
+
+
+def _display_quality_flags(item: MonthTimelineItem) -> list[str]:
+    return item.quality_flags or _quality_flags_for_item(item)
+
+
+def _clean_display_categories(values: list[str]) -> list[str]:
+    return _dedupe_str_list(
+        [
+            str(value)
+            for value in values
+            if value and value != LOW_PRIORITY_TAG and not str(value).startswith("quality:")
+        ][:8]
+    )
+
+
+def _dedupe_str_list(values: list[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        if value and value not in output:
+            output.append(value)
+    return output
+
+
+def _dedupe_evidence(values: list[dict[str, str]]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    seen = set()
+    for row in values:
+        note_id = str(row.get("note_id") or "")
+        quote = str(row.get("quote") or "")
+        key = (note_id, quote)
+        if note_id and quote and key not in seen:
+            seen.add(key)
+            output.append({"note_id": note_id, "quote": quote})
+    return output
 
 
 def _main_material_items(items: list[MonthTimelineItem]) -> list[MonthTimelineItem]:
@@ -2015,9 +2309,9 @@ def _store_month_timeline_snapshot(snapshot: MonthTimelineSnapshot, *, db_path: 
                     title, summary, detail, themes_json, categories_json,
                     emotion_json, evidence_json, source_table, source_id,
                     source_note_id, confidence, importance, date_confidence,
-                    date_source, date_quality, evidence_enriched, sort_key, created_at
+                    date_source, date_quality, evidence_enriched, quality_flags_json, sort_key, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.id,
@@ -2042,6 +2336,7 @@ def _store_month_timeline_snapshot(snapshot: MonthTimelineSnapshot, *, db_path: 
                     item.date_source,
                     item.date_quality,
                     1 if item.evidence_enriched else 0,
+                    json.dumps(item.quality_flags, ensure_ascii=False),
                     item.sort_key,
                     item.created_at,
                 ),
@@ -2107,6 +2402,7 @@ def _month_item_from_row(row) -> MonthTimelineItem:
         date_source=row["date_source"] if "date_source" in row.keys() and row["date_source"] else "",
         date_quality=row["date_quality"] if "date_quality" in row.keys() and row["date_quality"] else "",
         evidence_enriched=bool(row["evidence_enriched"]) if "evidence_enriched" in row.keys() else False,
+        quality_flags=_json_list(row["quality_flags_json"]) if "quality_flags_json" in row.keys() else [],
         sort_key=row["sort_key"] or "",
         created_at=row["created_at"] or "",
     )
