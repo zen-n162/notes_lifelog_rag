@@ -870,6 +870,7 @@ def timeline_command(
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
     limit: Annotated[int, typer.Option("--limit", help="Maximum timeline items.")] = 100,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    include_future: Annotated[bool, typer.Option("--include-future", help="Include future months that have no direct note/event/thought sources.")] = False,
     grouped_flag: Annotated[bool, typer.Option("--grouped", help="Use grouped monthly items in rich output.")] = False,
     ungrouped: Annotated[bool, typer.Option("--ungrouped", help="Show raw ungrouped timeline items in rich output.")] = False,
     show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in rich output.")] = False,
@@ -899,6 +900,7 @@ def timeline_command(
             order=order,
             limit=limit if limit else None,
             include_unknown=include_unknown,
+            include_future=include_future,
         )
         console.print(
             format_timeline_report(
@@ -919,9 +921,10 @@ def timeline_command(
 def timeline_months_command(
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    include_future: Annotated[bool, typer.Option("--include-future", help="Include future months that have no direct note/event/thought sources.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
-    rows = list_timeline_months(db_path=db, order=order, include_unknown=include_unknown)
+    rows = list_timeline_months(db_path=db, order=order, include_unknown=include_unknown, include_future=include_future)
     table = Table(title="Timeline Months")
     table.add_column("Month")
     table.add_column("Notes", justify="right")
@@ -957,6 +960,7 @@ def generate_timeline_command(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Do not write timeline tables.")] = False,
     show_sources: Annotated[bool, typer.Option("--show-sources", help="Show source counts.")] = False,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Generate unknown-date months such as 1900-01.")] = False,
+    include_future: Annotated[bool, typer.Option("--include-future", help="Generate future months that have no direct note/event/thought sources.")] = False,
     max_thoughts_per_month: Annotated[int, typer.Option("--max-thoughts-per-month", min=0, help="Maximum thought items per month.")] = 10,
     max_events_per_month: Annotated[int, typer.Option("--max-events-per-month", min=0, help="Maximum event items per month.")] = 10,
     max_summaries_per_month: Annotated[int, typer.Option("--max-summaries-per-month", min=0, help="Maximum note summary items per month.")] = 10,
@@ -972,7 +976,12 @@ def generate_timeline_command(
     months = [month] if month else None
     rows = months or [
         row.month
-        for row in list_timeline_months(db_path=db, order="desc", include_unknown=include_unknown)
+        for row in list_timeline_months(
+            db_path=db,
+            order="desc",
+            include_unknown=include_unknown,
+            include_future=include_future,
+        )
     ]
     if limit_months:
         rows = rows[:limit_months]
@@ -993,6 +1002,7 @@ def generate_timeline_command(
             force=force,
             dry_run=dry_run,
             include_unknown=include_unknown,
+            include_future=include_future,
             limits=TimelineBuildLimits(
                 max_thoughts=max_thoughts_per_month,
                 max_events=max_events_per_month,
@@ -1031,6 +1041,7 @@ def timeline_report_command(
     output: Annotated[Path, typer.Option("--output", help="Markdown output path.")] = Path("data/exports/timelines/timeline.md"),
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "asc",
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    include_future: Annotated[bool, typer.Option("--include-future", help="Include future months that have no direct note/event/thought sources.")] = False,
     grouped_flag: Annotated[bool, typer.Option("--grouped", help="Use grouped monthly items in report output.")] = False,
     ungrouped: Annotated[bool, typer.Option("--ungrouped", help="Use raw ungrouped timeline items in report output.")] = False,
     show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in report output.")] = False,
@@ -1047,6 +1058,7 @@ def timeline_report_command(
         db_path=db,
         order=order,
         include_unknown=include_unknown,
+        include_future=include_future,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -1069,6 +1081,7 @@ def timeline_qa_command(
     month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
     all_months: Annotated[bool, typer.Option("--all-months", help="Check every month.")] = False,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    include_future: Annotated[bool, typer.Option("--include-future", help="Include future months that have no direct note/event/thought sources.")] = False,
     show_items: Annotated[bool, typer.Option("--show-items", help="Show item previews for each QA row.")] = False,
     only_problems: Annotated[bool, typer.Option("--only-problems", help="Only show months with QA warnings.")] = False,
     format_name: Annotated[str, typer.Option("--format", help="Output format: table, pretty, markdown, or json.")] = "table",
@@ -1087,6 +1100,7 @@ def timeline_qa_command(
         all_months=all_months,
         db_path=db,
         include_unknown=include_unknown,
+        include_future=include_future,
         show_items=show_items or format_value in {"pretty", "markdown", "json"},
         only_problems=only_problems,
     )
@@ -1116,7 +1130,8 @@ def timeline_qa_command(
     table = Table(title="Timeline QA")
     table.add_column("Month")
     table.add_column("Score", justify="right")
-    table.add_column("Warnings")
+    table.add_column("Severe")
+    table.add_column("Review")
     table.add_column("Info")
     table.add_column("Source counts")
     table.add_column("Recommended action")
@@ -1125,14 +1140,15 @@ def timeline_qa_command(
     for row in rows:
         values = [
             row["month"],
-            f"{float(row['quality_score']):.2f}",
-            ", ".join(row["warnings"]) or "none",
+            f"{float(row.get('score', row.get('quality_score'))):.2f}",
+            ", ".join(row.get("severe_warnings") or []) or "none",
+            ", ".join(row.get("review_warnings") or row.get("warnings") or []) or "none",
             ", ".join(row.get("info_warnings") or []) or "none",
             json.dumps(row["source_counts"], ensure_ascii=False),
             row["recommended_action"],
         ]
         if show_items:
-            values.append(json.dumps(row.get("warning_items") or row.get("items") or [], ensure_ascii=False))
+            values.append(json.dumps(row.get("problem_items") or row.get("warning_items") or row.get("items") or [], ensure_ascii=False))
         table.add_row(*values)
     console.print(table)
 

@@ -341,6 +341,8 @@ def create_app():
                     timeline_dry_run = gr.Checkbox(label="dry run", value=True)
                     timeline_ungrouped = gr.Checkbox(label="show ungrouped items", value=False)
                     timeline_show_low_priority = gr.Checkbox(label="show low priority items", value=False)
+                    timeline_include_future = gr.Checkbox(label="include future months", value=False)
+                    timeline_include_unknown = gr.Checkbox(label="include unknown dates", value=False)
                     timeline_btn = gr.Button("Refresh Timeline", variant="primary")
                     timeline_generate_btn = gr.Button("Generate / Refresh Month")
                 timeline_state = gr.State(initial_timeline_month_snapshots)
@@ -364,7 +366,19 @@ def create_app():
                         timeline_source_detail = gr.HTML(renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。"))
                 timeline_btn.click(
                     _refresh_timeline_tab,
-                    inputs=[timeline_year, timeline_month, timeline_category, timeline_theme, timeline_item_type, timeline_sort, timeline_limit, timeline_ungrouped, timeline_show_low_priority],
+                    inputs=[
+                        timeline_year,
+                        timeline_month,
+                        timeline_category,
+                        timeline_theme,
+                        timeline_item_type,
+                        timeline_sort,
+                        timeline_limit,
+                        timeline_ungrouped,
+                        timeline_show_low_priority,
+                        timeline_include_future,
+                        timeline_include_unknown,
+                    ],
                     outputs=[timeline_output, timeline_detail, timeline_source_detail, timeline_state, timeline_status],
                 )
                 timeline_generate_btn.click(
@@ -626,7 +640,19 @@ def _select_qa_card(warnings: list[dict] | None, evt: EventData = None):
     )
 
 
-def _refresh_timeline_tab(year, month, category, theme, item_type, sort, limit, ungrouped=False, show_low_priority=False):
+def _refresh_timeline_tab(
+    year,
+    month,
+    category,
+    theme,
+    item_type,
+    sort,
+    limit,
+    ungrouped=False,
+    show_low_priority=False,
+    include_future=False,
+    include_unknown=False,
+):
     snapshots = services.get_timeline_month_snapshots(
         year=year or None,
         category=category or None,
@@ -634,6 +660,8 @@ def _refresh_timeline_tab(year, month, category, theme, item_type, sort, limit, 
         item_type=item_type or "all",
         sort=sort or "chronological_desc",
         limit=int(limit),
+        include_future=bool(include_future),
+        include_unknown=bool(include_unknown),
     )
     selected_month = month if month and any(snapshot.month == month for snapshot in snapshots) else (snapshots[0].month if snapshots else None)
     selected = _snapshot_by_month(snapshots, selected_month)

@@ -523,10 +523,19 @@ def get_timeline_month_snapshots(
     item_type: str = "all",
     sort: str = "chronological_desc",
     limit: int = 24,
+    include_future: bool = False,
+    include_unknown: bool = False,
     db_path: str | Path | None = None,
 ) -> list[MonthTimelineSnapshot]:
     order = "asc" if sort == "chronological_asc" else "desc"
-    snapshots = list_month_timeline_snapshots(year=year or None, db_path=db_path, order=order, limit=int(limit))
+    snapshots = list_month_timeline_snapshots(
+        year=year or None,
+        db_path=db_path,
+        order=order,
+        limit=int(limit),
+        include_future=include_future,
+        include_unknown=include_unknown,
+    )
     if category:
         snapshots = [snapshot for snapshot in snapshots if category in snapshot.dominant_categories or category in snapshot.key_themes]
     if theme:
@@ -566,8 +575,21 @@ def generate_timeline_snapshot_ui(
     return f"timeline {mode}: {snapshot.month} items={len(snapshot.items)} warnings={len(snapshot.quality.get('warnings') or [])}", snapshot
 
 
-def get_timeline_qa(month: str | None = None, all_months: bool = False, db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    return timeline_qa(month=month, all_months=all_months, db_path=db_path)
+def get_timeline_qa(
+    month: str | None = None,
+    all_months: bool = False,
+    *,
+    include_future: bool = False,
+    include_unknown: bool = False,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    return timeline_qa(
+        month=month,
+        all_months=all_months,
+        include_future=include_future,
+        include_unknown=include_unknown,
+        db_path=db_path,
+    )
 
 
 def get_reflection(month: str | None = None, db_path: str | Path | None = None) -> ReflectionReport:

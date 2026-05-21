@@ -429,6 +429,8 @@ low-priority, and `--only-problems` to focus on months that still need review.
 Phase 8 adds review-friendly output formats:
 
 ```bash
+python -m notes_lifelog_rag.cli timeline-qa --all-months --format table
+python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --format pretty
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items --format pretty
 python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --show-items --format markdown \
   --output data/exports/timelines/timeline_qa_report.md
@@ -437,15 +439,32 @@ python -m notes_lifelog_rag.cli timeline-qa --all-months --format json \
 ```
 
 `--format table` keeps the compact Rich table. `--format pretty` prints one
-month at a time with score, warnings, source counts, recommended action, and
+month at a time with score, severe/review/info warnings, source counts, recommended action, and
 problem items. `--format markdown` writes the same review structure as a report.
-`--format json` keeps `warning_items` machine-readable for later processing.
+`--format json` keeps `problem_items`, warning severity fields, and
+`quality_flags` machine-readable for later processing.
 When using `--show-items`, each problem item includes `title`, `item_type`,
 `source_note_id`, `quality_flags`, and a short reason. The recommended manual
 review flow is: run `generate-timeline --all-months --backend rule`, export a
 Markdown QA report with `--only-problems --show-items`, review noisy/low
 confidence months in the GUI Timeline tab, then open the source note detail from
 the problem item.
+
+Warning severity is split into three levels:
+
+- Severe: `evidence_missing`, `no_direct_sources`,
+  `future_month_without_sources`, `invalid_month`, `unknown_date_heavy`.
+- Review: `low_confidence`, `low_value_items_present`, `noisy_items_present`,
+  `title_only_evidence`, `generated_date_used_for_suggestion`,
+  `low_direct_events`, `low_direct_thoughts`.
+- Info: `date_modified_only`, `date_note_created`, `grouped_items_present`,
+  `low_priority_hidden`.
+
+`--only-problems` shows only months with severe or review warnings; info-only
+months are omitted. Future months with no direct notes/events/thoughts are
+hidden by default from `timeline-months` and `timeline-qa`; use
+`--include-future` to audit them. Unknown-date buckets such as `1900-01` remain
+hidden unless `--include-unknown` is provided.
 
 Other useful warnings:
 
@@ -455,10 +474,10 @@ Other useful warnings:
   analysis before "what I thought" or "what happened" can be trusted.
 - `noisy_items_present` / `low_value_items_present`: low priority notes are
   present and should be reviewed separately.
-- `date_attribution_uncertain`: some items have weak or missing dates.
+- `unknown_date_heavy`: many items have weak or missing dates.
 - `generated_date_used_for_suggestion`: a suggestion looked tied to its
   generated day and was treated cautiously.
-- `invalid_month_1900`: the month is an unknown-date fallback.
+- `invalid_month`: the month is an unknown-date fallback.
 
 `1900-01` is treated as an unknown-date bucket. It is hidden from
 `timeline-months`, `timeline --all-months`, reports, QA, and GUI month lists by

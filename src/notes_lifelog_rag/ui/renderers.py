@@ -8,6 +8,7 @@ from notes_lifelog_rag.timeline.service import (
     ReflectionReport,
     TimelineItem,
     timeline_qa_problem_items,
+    timeline_qa_severity_for_snapshot,
     timeline_item_display_groups,
     visible_timeline_flags,
 )
@@ -501,13 +502,18 @@ def render_timeline_month_cards(
     cards = []
     for snapshot in snapshots:
         selected = "selected" if selected_month == snapshot.month else ""
-        warning_badges = "".join(
+        severity = timeline_qa_severity_for_snapshot(snapshot)
+        severe_badges = "".join(
             f'<span class="note-badge review">{escape(str(warning))}</span>'
-            for warning in (snapshot.quality.get("warnings") or [])[:3]
+            for warning in severity["severe_warnings"][:2]
+        )
+        review_badges = "".join(
+            f'<span class="note-badge review">{escape(str(warning))}</span>'
+            for warning in severity["review_warnings"][:3]
         )
         info_badges = "".join(
             f'<span class="note-badge">{escape(str(warning))}</span>'
-            for warning in (snapshot.quality.get("info_warnings") or [])[:2]
+            for warning in severity["info_warnings"][:2]
         )
         themes = "".join(f'<span class="note-badge">{escape(theme)}</span>' for theme in snapshot.key_themes[:5])
         counts = snapshot.source_counts
@@ -524,7 +530,7 @@ def render_timeline_month_cards(
               <p class="note-snippet">{escape(snapshot.overview)}</p>
               <p class="note-snippet"><b>Thoughts</b>: {escape(snapshot.thought_summary)}</p>
               <p class="note-snippet"><b>Events</b>: {escape(snapshot.event_summary)}</p>
-              <div class="badge-row">{themes}{warning_badges}{info_badges}</div>
+              <div class="badge-row">{themes}{severe_badges}{review_badges}{info_badges}</div>
               <div class="note-meta">
                 <span>notes {int(counts.get("notes", 0))}</span>
                 <span>events {int(counts.get("events", 0))}</span>
@@ -546,9 +552,10 @@ def render_month_timeline_detail(
 ) -> str:
     if snapshot is None:
         return render_empty_state("月を選択してください。")
-    review_warnings = snapshot.quality.get("review_warnings") or snapshot.quality.get("warnings") or []
-    severe_warnings = snapshot.quality.get("severe_warnings") or []
-    info_warnings = snapshot.quality.get("info_warnings") or []
+    severity = timeline_qa_severity_for_snapshot(snapshot)
+    review_warnings = severity["review_warnings"]
+    severe_warnings = severity["severe_warnings"]
+    info_warnings = severity["info_warnings"]
     warnings = "".join(render_warning_banner(str(item)) for item in (severe_warnings + review_warnings)[:5])
     info_badges = "".join(f'<span class="note-badge">{escape(str(item))}</span>' for item in info_warnings[:4])
     themes = "".join(f'<span class="note-badge">{escape(theme)}</span>' for theme in snapshot.key_themes)

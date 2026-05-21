@@ -543,8 +543,8 @@ def test_unknown_month_triggers_date_warning(tmp_path: Path) -> None:
 
     snapshot = generate_month_timeline_snapshot("1900-01", db_path=db_path, dry_run=True)
 
-    assert "invalid_month_1900" in set(snapshot.quality["warnings"])
-    assert "date_attribution_uncertain" in set(snapshot.quality["warnings"])
+    assert "invalid_month" in set(snapshot.quality["warnings"])
+    assert "unknown_date_heavy" in set(snapshot.quality["warnings"])
 
 
 def test_low_priority_hidden_by_default_and_visible_when_requested(tmp_path: Path) -> None:
@@ -749,7 +749,10 @@ def test_date_modified_only_is_info_warning_and_qa_links_warning_items(tmp_path:
     assert "date_modified_only" in snapshot.quality["info_warnings"]
     assert "date_modified_only" not in snapshot.quality["warnings"]
     assert "date_modified_only" in qa["info_warnings"]
+    assert "date_modified_only" not in qa["review_warnings"]
+    assert "date_modified_only" not in qa["severe_warnings"]
     assert "date_modified_only" in qa["warning_items"]
+    assert "date_modified_only" not in qa["problem_items"]
 
 
 def test_generated_date_suggestion_is_excluded_when_no_target_or_evidence_date(tmp_path: Path) -> None:
@@ -833,13 +836,16 @@ def test_timeline_qa_markdown_and_json_outputs_include_problem_items(tmp_path: P
     markdown = markdown_path.read_text(encoding="utf-8")
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert "# Timeline QA Report" in markdown
+    assert "## Summary" in markdown
+    assert "## Recommended Next Actions" in markdown
     assert "Problem items:" in markdown
     assert "source_note_id:" in markdown
     assert "flags:" in markdown
     assert '"warning_items"' not in markdown
     assert data and data[0]["month"] == "2026-05"
+    assert {"score", "severe_warnings", "review_warnings", "info_warnings", "problem_items", "quality_flags"} <= set(data[0])
     assert data[0]["warning_items"]
-    first_problem = next(iter(data[0]["warning_items"].values()))[0]
+    first_problem = next(iter(data[0]["problem_items"].values()))[0]
     assert first_problem["source_note_id"] == "scan-note"
     assert first_problem["quality_flags"]
 
@@ -861,6 +867,8 @@ def test_timeline_qa_pretty_output_is_not_inline_json(tmp_path: Path) -> None:
     pretty = format_timeline_qa_pretty(qa_rows)
 
     assert "## 2026-05" in pretty
+    assert "Review warnings:" in pretty
+    assert "Info:" in pretty
     assert "Problem items:" in pretty
     assert "source_note_id:" in pretty
     assert '{"' not in pretty
@@ -882,7 +890,30 @@ def test_timeline_qa_only_problems_and_month_filter(tmp_path: Path) -> None:
         for index in range(2):
             _insert_event(conn, "clean-note", f"研究イベント{index}", confidence=0.9, importance=0.8)
             _insert_thought(conn, "clean-note", f"研究思考{index}", confidence=0.9, importance=0.8)
-        _insert_note(conn, "problem-note", "スキャンPDF", created_at="2026-06-01", source_path="scan.pdf")
+        conn.execute(
+            """
+            INSERT INTO notes(
+                id, content_hash, title, body, source_path, source_relative_path, file_type,
+                created_at, modified_at, imported_at, note_date, parser_name
+            )
+            VALUES (
+                'info-note', 'hash-info', 'Modified info note', 'modified body',
+                'info.md', 'info.md', 'md', '2026-05-01', '2026-04-10', '2026-05-01', '', 'test'
+            )
+            """
+        )
+        _insert_summary(
+            conn,
+            "info-note",
+            generated_title="Modified info note",
+            one_line_summary="modified_atだけで月に帰属するメモ。",
+            source_quote="modified_atだけで月に帰属するメモですが、元メモ本文で確認できる十分な長さのquoteです。",
+            importance=0.9,
+        )
+        for index in range(2):
+            _insert_event(conn, "info-note", f"補助イベント{index}", confidence=0.9, importance=0.8, date="2026-04-10")
+            _insert_thought(conn, "info-note", f"補助思考{index}", confidence=0.9, importance=0.8, date="2026-04-10")
+        _insert_note(conn, "problem-note", "スキャンPDF", created_at="2026-03-01", source_path="scan.pdf")
         _insert_summary(
             conn,
             "problem-note",
@@ -898,15 +929,69 @@ def test_timeline_qa_only_problems_and_month_filter(tmp_path: Path) -> None:
     )
     month_result = RUNNER.invoke(
         app,
-        ["timeline-qa", "--month", "2026-06", "--format", "json", "--db", str(db_path)],
+        ["timeline-qa", "--month", "2026-03", "--format", "json", "--db", str(db_path)],
     )
 
     assert clean_result.exit_code == 0, clean_result.output
     data = json.loads(clean_result.output)
-    assert [row["month"] for row in data] == ["2026-06"]
+    assert [row["month"] for row in data] == ["2026-03"]
     assert month_result.exit_code == 0, month_result.output
     month_data = json.loads(month_result.output)
-    assert [row["month"] for row in month_data] == ["2026-06"]
+    assert [row["month"] for row in month_data] == ["2026-03"]
+
+
+def test_future_month_hidden_by_default_and_include_future_shows_it(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO suggestions(
+                note_id, suggestion_type, title, message, target_date, importance,
+                confidence, evidence_json, status, created_at
+            )
+            VALUES (NULL, 'revisit_note', 'Future generated reminder', 'future only', '2999-01-10', 0.8, 0.8, '[]', 'new', '2026-05-01')
+            """
+        )
+        conn.commit()
+
+    hidden_months = [row.month for row in list_timeline_months(db_path=db_path)]
+    visible_months = [row.month for row in list_timeline_months(db_path=db_path, include_future=True)]
+    hidden_qa = RUNNER.invoke(app, ["timeline-qa", "--all-months", "--format", "json", "--db", str(db_path)])
+    visible_qa = RUNNER.invoke(
+        app,
+        ["timeline-qa", "--all-months", "--include-future", "--format", "json", "--db", str(db_path)],
+    )
+
+    assert "2999-01" not in hidden_months
+    assert "2999-01" in visible_months
+    assert hidden_qa.exit_code == 0, hidden_qa.output
+    assert json.loads(hidden_qa.output) == []
+    assert visible_qa.exit_code == 0, visible_qa.output
+    visible_rows = json.loads(visible_qa.output)
+    assert [row["month"] for row in visible_rows] == ["2999-01"]
+    assert "future_month_without_sources" in visible_rows[0]["severe_warnings"]
+
+
+def test_timeline_qa_include_unknown_shows_unknown_month(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "unknown-note", "日付不明", created_at="1900-01-01")
+        _insert_summary(
+            conn,
+            "unknown-note",
+            generated_title="日付不明",
+            one_line_summary="日付が不明なメモ。",
+            importance=0.8,
+        )
+        conn.commit()
+
+    hidden_months = [row.month for row in list_timeline_months(db_path=db_path)]
+    visible_months = [row.month for row in list_timeline_months(db_path=db_path, include_unknown=True)]
+
+    assert "1900-01" not in hidden_months
+    assert "1900-01" in visible_months
 
 
 def _insert_note(
@@ -975,6 +1060,7 @@ def _insert_event(
     *,
     confidence: float,
     importance: float,
+    date: str = "2026-05-01",
 ) -> None:
     conn.execute(
         """
@@ -982,15 +1068,18 @@ def _insert_event(
             note_id, title, summary, event_type, event_date, date_label,
             date_confidence, importance, confidence, evidence_json, created_at
         )
-        VALUES (?, ?, ?, 'research', '2026-05-01', '2026-05-01', 'high', ?, ?, ?, '2026-05-01')
+        VALUES (?, ?, ?, 'research', ?, ?, 'high', ?, ?, ?, ?)
         """,
         (
             note_id,
             title,
             f"{title}を進めた。",
+            date,
+            date,
             importance,
             confidence,
             json.dumps([{"note_id": note_id, "quote": f"{title}について、月面探査と機械学習の研究方針を整理した。"}]),
+            date,
         ),
     )
 
@@ -1002,21 +1091,24 @@ def _insert_thought(
     *,
     confidence: float,
     importance: float,
+    date: str = "2026-05-01",
 ) -> None:
     conn.execute(
         """
         INSERT INTO thoughts(
-            note_id, title, summary, thought_type, themes_json, emotion_label,
+            note_id, title, summary, thought_type, date_label, themes_json, emotion_label,
             emotion_intensity, importance, confidence, remember_reason, evidence_json, created_at
         )
-        VALUES (?, ?, ?, 'research', '["研究"]', '', 0.0, ?, ?, '研究方針を見返す', ?, '2026-05-01')
+        VALUES (?, ?, ?, 'research', ?, '["研究"]', '', 0.0, ?, ?, '研究方針を見返す', ?, ?)
         """,
         (
             note_id,
             title,
             f"{title}について考えた。",
+            date,
             importance,
             confidence,
             json.dumps([{"note_id": note_id, "quote": f"{title}について、月面探査と機械学習の研究方針を整理した。"}]),
+            date,
         ),
     )

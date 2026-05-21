@@ -586,6 +586,8 @@ python -m notes_lifelog_rag.cli timeline-report --year 2026 --grouped --low-prio
 python -m notes_lifelog_rag.cli timeline-qa --all-months
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items
 python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems
+python -m notes_lifelog_rag.cli timeline-qa --all-months --format table
+python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --format pretty
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items --format pretty
 python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --show-items --format markdown --output data/exports/timelines/timeline_qa_report.md
 python -m notes_lifelog_rag.cli timeline-qa --all-months --format json --output data/exports/timelines/timeline_qa_report.json
@@ -670,19 +672,24 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
           <p>
             <code>1900-01</code> は日付不明のfallback bucketとして扱い、通常の
             <code>timeline-months</code> やGUI月一覧では非表示です。必要な場合だけ
-            <code>--include-unknown</code> で確認します。
+            <code>--include-unknown</code> で確認します。未来月かつdirect sourceがない月も通常は非表示で、
+            <code>--include-future</code> またはGUIのinclude future monthsで監査できます。
             主な quality warning は <code>suggestions_dominated</code>,
             <code>low_direct_thoughts</code>, <code>low_direct_events</code>,
             <code>noisy_items_present</code>, <code>low_value_items_present</code>,
-            <code>date_attribution_uncertain</code>, <code>invalid_month_1900</code> です。
-            <code>date_modified_only</code> はApple Notes由来では自然に起きるためinfo badge扱いです。
+            <code>unknown_date_heavy</code>, <code>invalid_month</code> です。
+            QA warningは severe / review / info に分類され、
+            <code>date_modified_only</code> や <code>date_note_created</code> はApple Notes由来では自然に起きるためinfo badge扱いです。
+            <code>timeline-qa --only-problems</code> はsevere/reviewのある月だけを表示し、info-only月は除外します。
             <code>timeline-qa --show-items</code> はwarningごとの該当itemとreasonを表示します。
             Suggestionsは生成日ではなくtarget dateまたはevidence note dateで月帰属し、
             それが取れない場合はTimeline main sourceから外します。
             Phase 8では <code>--format table|pretty|markdown|json</code> と
             <code>--output</code> を追加し、横長JSONではなく月ごとのreview reportとして読めるようにしました。
-            Markdown reportは人間の確認用、JSON reportは後続処理用です。
-            GUI Timeline detailにもQA score、warning badges、problem items、source_note_idを表示し、
+            Markdown reportはSummary、Problem Months、Recommended Next Actionsを含む人間の確認用、
+            JSON reportは <code>severe_warnings</code>, <code>review_warnings</code>,
+            <code>info_warnings</code>, <code>problem_items</code>, <code>quality_flags</code> を含む後続処理用です。
+            GUI Timeline detailにもQA score、severe/review/info badges、problem items、source_note_idを表示し、
             problem itemから元メモdetail previewを開けます。
           </p>
           <p>

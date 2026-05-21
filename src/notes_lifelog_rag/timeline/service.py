@@ -167,8 +167,41 @@ DEFAULT_TIMELINE_LIMITS = TimelineBuildLimits()
 UNKNOWN_MONTHS = {"1900-01", "0000-00", "unknown"}
 LOW_PRIORITY_TAG = "low_priority"
 MAIN_VISIBLE_FLAGS = {"low_confidence", "weak_evidence", "date_uncertain"}
-INFO_WARNINGS = {"date_modified_only"}
-SEVERE_WARNINGS = {"evidence_missing", "unknown_date", "date_attribution_uncertain", "invalid_month_1900", "suggestions_dominated"}
+SEVERE_WARNINGS = {
+    "evidence_missing",
+    "no_direct_sources",
+    "future_month_without_sources",
+    "invalid_month",
+    "unknown_date_heavy",
+}
+REVIEW_WARNINGS = {
+    "low_confidence",
+    "low_value_items_present",
+    "noisy_items_present",
+    "title_only_evidence",
+    "generated_date_used_for_suggestion",
+    "low_direct_events",
+    "low_direct_thoughts",
+    "fallback_heavy",
+    "suggestions_dominated",
+}
+INFO_WARNINGS = {
+    "date_modified_only",
+    "date_note_created",
+    "grouped_items_present",
+    "low_priority_hidden",
+}
+WARNING_ALIASES = {
+    "invalid_month_1900": "invalid_month",
+    "unknown_date": "unknown_date_heavy",
+    "date_attribution_uncertain": "unknown_date_heavy",
+    "too_few_thoughts": "low_direct_thoughts",
+    "too_few_events": "low_direct_events",
+    "thought_summary is empty": "low_direct_thoughts",
+    "event_summary is empty": "low_direct_events",
+    "evidence is missing": "evidence_missing",
+    "monthly_timeline_snapshot is missing": "evidence_missing",
+}
 
 
 def build_timeline(month: str | None = None, *, db_path: str | Path | None = None, limit: int = 100) -> list[TimelineItem]:
@@ -350,21 +383,21 @@ def list_timeline_months(
     db_path: str | Path | None = None,
     order: str = "desc",
     include_unknown: bool = False,
+    include_future: bool = False,
 ) -> list[TimelineMonthSummary]:
     init_db(db_path)
     with connect(db_path) as conn:
         months = sorted(
-            {
-                month
-                for month in _timeline_month_values(conn)
-                if month
-                and (include_unknown or not _is_unknown_month(month))
-            },
+            {month for month in _timeline_month_values(conn) if month},
             reverse=(order != "asc"),
         )
         output: list[TimelineMonthSummary] = []
         for month in months:
+            if not include_unknown and _is_unknown_month(month):
+                continue
             counts = _month_source_counts(conn, month)
+            if not include_future and _should_hide_future_month(month, counts):
+                continue
             snapshot = conn.execute(
                 """
                 SELECT quality_json
@@ -619,13 +652,19 @@ def generate_timeline_snapshots(
     dry_run: bool = False,
     limits: TimelineBuildLimits | None = None,
     include_unknown: bool = False,
+    include_future: bool = False,
     progress_callback=None,
 ) -> list[MonthTimelineSnapshot]:
     values = months or []
     if all_months or not values:
         values = [
             row.month
-            for row in list_timeline_months(db_path=db_path, order="desc", include_unknown=include_unknown)
+            for row in list_timeline_months(
+                db_path=db_path,
+                order="desc",
+                include_unknown=include_unknown,
+                include_future=include_future,
+            )
         ]
     if limit_months is not None:
         values = values[: max(0, int(limit_months))]
@@ -690,10 +729,16 @@ def list_month_timeline_snapshots(
     order: str = "desc",
     limit: int | None = None,
     include_unknown: bool = False,
+    include_future: bool = False,
 ) -> list[MonthTimelineSnapshot]:
     months = [
         item.month
-        for item in list_timeline_months(db_path=db_path, order=order, include_unknown=include_unknown)
+        for item in list_timeline_months(
+            db_path=db_path,
+            order=order,
+            include_unknown=include_unknown,
+            include_future=include_future,
+        )
     ]
     if year:
         months = [month for month in months if month.startswith(str(year))]
@@ -834,6 +879,7 @@ def timeline_qa(
     all_months: bool = False,
     db_path: str | Path | None = None,
     include_unknown: bool = False,
+    include_future: bool = False,
     show_items: bool = False,
     only_problems: bool = False,
 ) -> list[dict[str, Any]]:
@@ -841,7 +887,12 @@ def timeline_qa(
     if all_months or not months:
         months = [
             item.month
-            for item in list_timeline_months(db_path=db_path, order="desc", include_unknown=include_unknown)
+            for item in list_timeline_months(
+                db_path=db_path,
+                order="desc",
+                include_unknown=include_unknown,
+                include_future=include_future,
+            )
         ]
     rows = []
     for value in months:
@@ -849,38 +900,52 @@ def timeline_qa(
             continue
         snapshot = get_month_timeline_snapshot(value, db_path=db_path, generate_if_missing=True)
         if snapshot is None:
+            severe_warnings = ["evidence_missing"]
             rows.append(
                 {
                     "month": value,
+                    "score": 0.0,
                     "quality_score": 0.0,
-                    "warnings": ["monthly_timeline_snapshot is missing"],
+                    "warnings": severe_warnings,
+                    "severe_warnings": severe_warnings,
+                    "review_warnings": [],
                     "info_warnings": [],
                     "source_counts": {},
                     "recommended_action": "generate-timelineを実行してください。",
+                    "problem_items": {},
+                    "quality_flags": [],
                 }
             )
             continue
-        warnings = list(snapshot.quality.get("warnings") or [])
-        info_warnings = list(snapshot.quality.get("info_warnings") or [])
-        if not snapshot.thought_summary.strip():
-            warnings.append("thought_summary is empty")
-        if not snapshot.event_summary.strip():
-            warnings.append("event_summary is empty")
-        if not snapshot.evidence:
-            warnings.append("evidence is missing")
+        severity = timeline_qa_severity_for_snapshot(snapshot)
+        severe_warnings = list(severity["severe_warnings"])
+        review_warnings = list(severity["review_warnings"])
+        info_warnings = list(severity["info_warnings"])
+        warnings = severe_warnings + review_warnings
         score = max(0.0, min(1.0, float(snapshot.quality.get("quality_score", 0.0))))
-        if only_problems and not warnings:
+        if only_problems and not (severe_warnings or review_warnings):
             continue
+        display_groups = timeline_item_display_groups(snapshot.items, grouped=True)
+        warning_items = _timeline_warning_items(snapshot, display_groups)
+        problem_items = {
+            warning: items
+            for warning, items in warning_items.items()
+            if warning in set(severe_warnings + review_warnings)
+        }
         qa_row = {
             "month": snapshot.month,
+            "score": score,
             "quality_score": score,
             "warnings": warnings,
+            "severe_warnings": severe_warnings,
+            "review_warnings": review_warnings,
             "info_warnings": info_warnings,
             "source_counts": snapshot.source_counts,
-            "recommended_action": _timeline_qa_action(warnings, snapshot=snapshot),
+            "recommended_action": _timeline_qa_action(warnings + info_warnings, snapshot=snapshot),
+            "problem_items": problem_items,
+            "quality_flags": _timeline_quality_flags(snapshot.items),
         }
         if show_items:
-            display_groups = timeline_item_display_groups(snapshot.items, grouped=True)
             display_items = display_groups["main"] + display_groups["suggestions"] + display_groups["low_priority"]
             qa_row["items"] = [
                 {
@@ -893,7 +958,7 @@ def timeline_qa(
                 }
                 for item in display_items[:20]
             ]
-            qa_row["warning_items"] = _timeline_warning_items(snapshot, display_groups)
+            qa_row["warning_items"] = warning_items
         rows.append(qa_row)
     return rows
 
@@ -909,16 +974,22 @@ def format_timeline_qa_pretty(rows: list[dict[str, Any]], *, markdown: bool = Fa
         lines.extend(
             [
                 f"## {row.get('month') or 'unknown'}",
-                f"Score: {float(row.get('quality_score') or 0.0):.2f}",
-                "Warnings:",
+                f"Score: {float(row.get('score', row.get('quality_score')) or 0.0):.2f}",
+                "",
+                "Severe warnings:",
             ]
         )
-        warnings = list(row.get("warnings") or [])
-        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        severe_warnings = list(row.get("severe_warnings") or [])
+        lines.extend([f"- {warning}" for warning in severe_warnings] or ["- none"])
+        lines.append("")
+        lines.append("Review warnings:")
+        review_warnings = list(row.get("review_warnings") or row.get("warnings") or [])
+        lines.extend([f"- {warning}" for warning in review_warnings] or ["- none"])
+        lines.append("")
         info_warnings = list(row.get("info_warnings") or [])
-        if info_warnings:
-            lines.append("Info:")
-            lines.extend(f"- {warning}" for warning in info_warnings)
+        lines.append("Info:")
+        lines.extend([f"- {warning}" for warning in info_warnings] or ["- none"])
+        lines.append("")
         lines.append("Source counts:")
         counts = row.get("source_counts") or {}
         for key in ("notes", "summaries", "events", "thoughts", "suggestions", "monthly_reflections"):
@@ -927,8 +998,8 @@ def format_timeline_qa_pretty(rows: list[dict[str, Any]], *, markdown: bool = Fa
         for key, value in counts.items():
             if key not in {"notes", "summaries", "events", "thoughts", "suggestions", "monthly_reflections", "categories"}:
                 lines.append(f"- {key}: {value}")
-        lines.extend(["Recommended action:", f"- {row.get('recommended_action') or 'Timeline detailを確認してください。'}"])
-        warning_items = row.get("warning_items") or {}
+        lines.extend(["", "Recommended action:", f"- {row.get('recommended_action') or 'Timeline detailを確認してください。'}"])
+        warning_items = row.get("problem_items") or row.get("warning_items") or {}
         lines.append("Problem items:")
         if warning_items:
             for warning, items in warning_items.items():
@@ -951,15 +1022,134 @@ def format_timeline_qa_pretty(rows: list[dict[str, Any]], *, markdown: bool = Fa
 
 
 def format_timeline_qa_markdown(rows: list[dict[str, Any]]) -> str:
-    return format_timeline_qa_pretty(rows, markdown=True)
+    problem_rows = [
+        row
+        for row in rows
+        if row.get("severe_warnings") or row.get("review_warnings") or row.get("warnings")
+    ]
+    severe_count = sum(len(row.get("severe_warnings") or []) for row in rows)
+    review_count = sum(len(row.get("review_warnings") or row.get("warnings") or []) for row in rows)
+    info_only_count = sum(
+        1
+        for row in rows
+        if row.get("info_warnings") and not (row.get("severe_warnings") or row.get("review_warnings") or row.get("warnings"))
+    )
+    lines = [
+        "# Timeline QA Report",
+        "",
+        "## Summary",
+        f"- Total months: {len(rows)}",
+        f"- Problem months: {len(problem_rows)}",
+        f"- Severe warnings: {severe_count}",
+        f"- Review warnings: {review_count}",
+        f"- Info-only months: {info_only_count}",
+        "",
+        "## Problem Months",
+    ]
+    if problem_rows:
+        lines.append(format_timeline_qa_pretty(problem_rows).rstrip())
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "## Recommended Next Actions",
+            "- evidence_missing / title_only_evidence がある月は、元メモ本文のquoteを確認してください。",
+            "- noisy_items_present / low_value_items_present がある月は、Low Priority itemsを確認してください。",
+            "- low_direct_thoughts / low_direct_events が続く月は、extract-thoughts / extract-events 後に generate-timeline --force を実行してください。",
+            "- future_month_without_sources / invalid_month がある場合は、日付帰属を確認してください。",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def format_timeline_qa_json(rows: list[dict[str, Any]]) -> str:
-    return json.dumps(rows, ensure_ascii=False, indent=2) + "\n"
+    normalized = []
+    for row in rows:
+        copied = dict(row)
+        copied["score"] = float(copied.get("score", copied.get("quality_score")) or 0.0)
+        copied.setdefault("severe_warnings", [])
+        copied.setdefault("review_warnings", copied.get("warnings") or [])
+        copied.setdefault("info_warnings", [])
+        copied.setdefault("problem_items", copied.get("warning_items") or {})
+        copied.setdefault("quality_flags", [])
+        normalized.append(copied)
+    return json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
+
+
+def timeline_qa_severity_for_snapshot(snapshot: MonthTimelineSnapshot) -> dict[str, list[str]]:
+    severe: set[str] = set()
+    review: set[str] = set()
+    info: set[str] = set(str(item) for item in snapshot.quality.get("info_warnings") or [])
+    quality = snapshot.quality or {}
+    date_source_counts = quality.get("date_source_counts") or {}
+    source_counts = snapshot.source_counts or quality.get("source_counts") or {}
+
+    raw_warnings = (
+        list(quality.get("severe_warnings") or [])
+        + list(quality.get("review_warnings") or [])
+        + list(quality.get("warnings") or [])
+    )
+    if not snapshot.thought_summary.strip():
+        raw_warnings.append("thought_summary is empty")
+    if not snapshot.event_summary.strip():
+        raw_warnings.append("event_summary is empty")
+    if not snapshot.evidence:
+        raw_warnings.append("evidence is missing")
+
+    unknown_date_count = int(date_source_counts.get("unknown") or 0)
+    for raw in raw_warnings:
+        warning = WARNING_ALIASES.get(str(raw), str(raw))
+        if warning == "unknown_date_heavy" and unknown_date_count <= 0 and not _is_unknown_month(snapshot.month):
+            if int(date_source_counts.get("note_modified_at") or 0) > 0:
+                info.add("date_modified_only")
+            continue
+        if warning in INFO_WARNINGS:
+            info.add(warning)
+        elif warning in SEVERE_WARNINGS:
+            severe.add(warning)
+        elif warning in REVIEW_WARNINGS:
+            review.add(warning)
+        else:
+            review.add(warning)
+
+    if _is_unknown_month(snapshot.month):
+        severe.add("invalid_month")
+        if unknown_date_count > 0:
+            severe.add("unknown_date_heavy")
+    if _direct_source_count(source_counts) <= 0:
+        severe.add("no_direct_sources")
+    if _should_hide_future_month(snapshot.month, source_counts):
+        severe.add("future_month_without_sources")
+    if int(date_source_counts.get("note_modified_at") or 0) > 0:
+        info.add("date_modified_only")
+    if int(date_source_counts.get("note_created_at") or 0) > 0:
+        info.add("date_note_created")
+
+    groups = timeline_item_display_groups(snapshot.items, grouped=True)
+    if any(item.sub_items for item in groups["main"] + groups["suggestions"] + groups["low_priority"]):
+        info.add("grouped_items_present")
+    if groups["low_priority"]:
+        info.add("low_priority_hidden")
+
+    severe -= info
+    review -= info
+    review -= severe
+    return {
+        "severe_warnings": sorted(severe),
+        "review_warnings": sorted(review),
+        "info_warnings": sorted(info),
+    }
 
 
 def timeline_qa_problem_items(snapshot: MonthTimelineSnapshot) -> dict[str, list[dict[str, Any]]]:
-    return _timeline_warning_items(snapshot, timeline_item_display_groups(snapshot.items, grouped=True))
+    severity = timeline_qa_severity_for_snapshot(snapshot)
+    visible = set(severity["severe_warnings"] + severity["review_warnings"])
+    return {
+        warning: items
+        for warning, items in _timeline_warning_items(snapshot, timeline_item_display_groups(snapshot.items, grouped=True)).items()
+        if warning in visible
+    }
 
 
 def _store_reflection(report: ReflectionReport, *, db_path: str | Path | None) -> None:
@@ -2312,12 +2502,15 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
         warnings.append("title_only_evidence")
     if any(item.confidence <= 0.45 for item in items):
         warnings.append("low_confidence")
+    date_source_counts = Counter(item.date_source or "unknown" for item in items)
     unknown_dates = sum(1 for item in items if not item.date_start or item.date_source == "unknown")
-    modified_only_dates = sum(1 for item in items if item.date_source == "note_modified_at")
+    modified_only_dates = int(date_source_counts.get("note_modified_at") or 0)
     if items and unknown_dates / len(items) > 0.25:
-        warnings.extend(["unknown_date", "date_attribution_uncertain"])
+        warnings.append("unknown_date_heavy")
     if items and modified_only_dates / len(items) > 0.5:
         info_warnings.append("date_modified_only")
+    if int(date_source_counts.get("note_created_at") or 0) > 0:
+        info_warnings.append("date_note_created")
     direct_items = _direct_items(items)
     main_items = _main_material_items(items)
     suggestion_items = [item for item in items if item.item_type == "suggestion"]
@@ -2340,7 +2533,12 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
     if any("quality:generated_date_used_for_suggestion" in item.categories for item in suggestion_items):
         warnings.append("generated_date_used_for_suggestion")
     if _is_unknown_month(str(sources.get("month") or "")):
-        warnings.extend(["invalid_month_1900", "date_attribution_uncertain"])
+        warnings.extend(["invalid_month", "unknown_date_heavy"])
+    if _direct_source_count(counts) <= 0:
+        warnings.append("no_direct_sources")
+    if _should_hide_future_month(str(sources.get("month") or ""), counts):
+        warnings.append("future_month_without_sources")
+    warnings = sorted({WARNING_ALIASES.get(str(warning), str(warning)) for warning in warnings})
     source_count = max(len(items), 1)
     quality_score = 1.0
     quality_score -= 0.1 * len(set(warnings))
@@ -2352,12 +2550,12 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
         quality_score += 0.08
     quality_score += min(0.2, len(evidence_items) / source_count * 0.2)
     quality_score = max(0.0, min(1.0, quality_score))
-    review_warnings = sorted(set(warnings) - SEVERE_WARNINGS)
     severe_warnings = sorted(set(warnings) & SEVERE_WARNINGS)
+    review_warnings = sorted(set(warnings) - set(severe_warnings) - INFO_WARNINGS)
     return {
         "source_counts": counts,
         "item_counts": dict(Counter(item.item_type for item in items)),
-        "date_source_counts": dict(Counter(item.date_source or "unknown" for item in items)),
+        "date_source_counts": dict(date_source_counts),
         "main_item_count": len(main_items),
         "low_priority_item_count": len(low_priority_items),
         "evidence_coverage": len(evidence_items) / source_count,
@@ -2578,6 +2776,12 @@ def _timeline_qa_action(warnings: list[str], *, snapshot: MonthTimelineSnapshot 
     if not warnings:
         return "ready"
     source_counts = snapshot.source_counts if snapshot else {}
+    if "future_month_without_sources" in warnings:
+        return "未来月ですが直接ソースがありません。必要なら --include-future で確認し、日付帰属を見直してください。"
+    if "invalid_month" in warnings or "unknown_date_heavy" in warnings:
+        return "日付不明または不正日付のitemが多いです。source noteの日付やdate_labelを確認してください。"
+    if "no_direct_sources" in warnings:
+        return "直接ソースがありません。suggestion/reflectionではなく、notes/events/thoughtsの月帰属を確認してください。"
     if "title_only_evidence" in warnings or "evidence_missing" in warnings:
         if (source_counts.get("thoughts", 0) or 0) + (source_counts.get("events", 0) or 0) >= 3:
             return "direct thoughts/eventsはありますがevidenceが弱いです。generate-timeline --forceで本文quote補完後、title-only evidenceをレビューしてください。"
@@ -2593,8 +2797,8 @@ def _timeline_qa_action(warnings: list[str], *, snapshot: MonthTimelineSnapshot 
         return "suggestions以外のthought/event/note summaryを増やしてから再生成してください。"
     if "noisy_items_present" in warnings or "low_value_items_present" in warnings:
         return "noisy PDF/scan由来の低優先項目があります。Low Priorityを確認し、必要なら元メモを除外・再分類してください。"
-    if "date_attribution_uncertain" in warnings or "unknown_date" in warnings or "date_modified_only" in warnings:
-        return "日付帰属が弱い項目があります。source noteの日付やdate_labelを確認してください。"
+    if "date_modified_only" in warnings or "date_note_created" in warnings:
+        return "軽微な日付情報があります。必要に応じてsource noteの日付を確認してください。"
     return "Timeline detailで元メモを確認してください。"
 
 
@@ -2629,7 +2833,7 @@ def _timeline_warning_items(
         if "weak_evidence" in flags:
             add("evidence_missing", item, "weak or missing evidence")
         if "date_uncertain" in flags:
-            add("date_attribution_uncertain", item, "date source is unknown or low quality")
+            add("unknown_date_heavy", item, "date source is unknown or low quality")
         if "generated_date_used_for_suggestion" in flags:
             add("generated_date_used_for_suggestion", item, "suggestion still carries generated-date warning")
 
@@ -2639,6 +2843,28 @@ def _timeline_warning_items(
             add("date_modified_only", pseudo, "uses note.modified_at as timeline date")
 
     return {warning: values[:12] for warning, values in mapping.items()}
+
+
+def _timeline_quality_flags(items: list[MonthTimelineItem]) -> list[str]:
+    values = sorted({str(flag) for item in items for flag in (item.quality_flags or []) if str(flag)})
+    return values
+
+
+def _direct_source_count(counts: dict[str, Any]) -> int:
+    return sum(int(counts.get(key) or 0) for key in ("notes", "summaries", "events", "thoughts"))
+
+
+def _should_hide_future_month(month: str, counts: dict[str, Any]) -> bool:
+    return _is_future_month(month) and _direct_source_count(counts) <= 0
+
+
+def _is_future_month(month: str) -> bool:
+    normalized = _normalize_month_key(month) or month
+    if _is_unknown_month(normalized):
+        return False
+    if not re.match(r"^\d{4}-\d{2}$", normalized):
+        return False
+    return normalized > datetime.now().strftime("%Y-%m")
 
 
 def _json_list(payload: str | None) -> list[Any]:
