@@ -348,6 +348,16 @@ APP_CSS = """
   color: #d2bb88;
 }
 
+.low-priority-details summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #d8c58a;
+}
+
+.low-priority-details[open] summary {
+  margin-bottom: 12px;
+}
+
 .section-title-row {
   display: flex;
   justify-content: space-between;

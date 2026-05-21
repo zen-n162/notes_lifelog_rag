@@ -330,6 +330,150 @@ def test_generate_timeline_force_replaces_only_target_month(tmp_path: Path) -> N
         )
 
 
+def test_direct_thoughts_events_and_enriched_evidence_drive_month_summary(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    body = (
+        "QST ESでは、宇宙データを対象にした機械学習経験を公共性の高い研究支援へ接続する方針を整理した。"
+        "月面探査やハイパースペクトル解析も研究計画として見直している。"
+    )
+    with connect(db_path) as conn:
+        _insert_note(conn, "qst-note", "QST ES", created_at="2026-05-03", body=body)
+        _insert_summary(
+            conn,
+            "qst-note",
+            generated_title="QST ES",
+            one_line_summary="宇宙データと機械学習経験を公共性の高い研究支援に接続するメモ。",
+            source_quote="# QST ES",
+            importance=0.85,
+        )
+        conn.execute(
+            """
+            INSERT INTO thoughts(
+                note_id, title, summary, thought_type, themes_json, emotion_label,
+                emotion_intensity, date_label, importance, confidence, remember_reason,
+                evidence_json, created_at
+            )
+            VALUES (
+                'qst-note', '研究経験の接続', '宇宙データの機械学習経験を公共性の高い研究支援へ接続しようとしている。',
+                'career', '["研究","QST"]', '', 0.0, '2026-05-03', 0.8, 0.8, '志望軸として再確認する',
+                '[{"note_id":"qst-note","quote":"QST ES"}]', '2026-05-03'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO events(
+                note_id, title, summary, event_type, event_date, date_label,
+                date_confidence, importance, confidence, evidence_json, created_at
+            )
+            VALUES (
+                'qst-note', 'QST ES整理', 'QST ESの志望動機と自己PRを整理した。',
+                'career', '2026-05-03', '2026-05-03', 'high', 0.75, 0.8,
+                '[{"note_id":"qst-note","quote":"QST ES"}]', '2026-05-03'
+            )
+            """
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    main_items = [item for item in snapshot.items if item.item_type != "suggestion" and "low_priority" not in item.categories]
+
+    assert "thought抽出はまだ少ないため" not in snapshot.thought_summary
+    assert "宇宙データ" in snapshot.thought_summary
+    assert "QST ES整理" in snapshot.event_summary
+    assert any(item.item_type == "thought" for item in main_items)
+    assert any(item.item_type == "event" for item in main_items)
+    assert any(item.evidence_enriched for item in snapshot.items)
+    assert "title_only_evidence" not in set(snapshot.quality["warnings"])
+    assert "date_attribution_uncertain" not in set(snapshot.quality["warnings"])
+
+
+def test_unknown_month_triggers_date_warning(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "unknown-note", "Unknown note", created_at="1900-01-01")
+        _insert_summary(
+            conn,
+            "unknown-note",
+            generated_title="Unknown",
+            one_line_summary="日付が不明なメモ。",
+            importance=0.8,
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("1900-01", db_path=db_path, dry_run=True)
+
+    assert "invalid_month_1900" in set(snapshot.quality["warnings"])
+    assert "date_attribution_uncertain" in set(snapshot.quality["warnings"])
+
+
+def test_low_priority_hidden_by_default_and_visible_when_requested(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        for index in range(7):
+            note_id = f"scan-{index}"
+            _insert_note(conn, note_id, f"スキャンPDF {index}", created_at="2026-05-01", source_path=f"scan-{index}.pdf")
+            _insert_summary(
+                conn,
+                note_id,
+                generated_title=f"スキャンPDF {index}",
+                one_line_summary=f"｜｜｜ ノイズ断片 {index}",
+                importance=0.8,
+            )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    default_md = format_month_timeline_markdown(snapshot)
+    full_md = format_month_timeline_markdown(snapshot, show_low_priority=True)
+
+    assert "... (+" in default_md
+    assert "スキャンPDF 6" not in default_md
+    assert "スキャンPDF 6" in full_md
+    assert "スキャンPDF" not in snapshot.overview
+
+
+def test_suggestions_do_not_contribute_to_overview(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(
+            conn,
+            "main-note",
+            "研究計画",
+            created_at="2026-05-01",
+            body="月面探査と機械学習の研究計画を整理し、ハイパースペクトル解析の方向性を確認した。",
+        )
+        _insert_summary(
+            conn,
+            "main-note",
+            generated_title="研究計画",
+            one_line_summary="月面探査と機械学習の研究計画を整理した。",
+            importance=0.85,
+        )
+        conn.execute(
+            """
+            INSERT INTO suggestions(
+                note_id, suggestion_type, title, message, target_date, importance,
+                confidence, evidence_json, status, created_at
+            )
+                VALUES (
+                    'main-note', 'revisit_note', 'マスカラ / SixTONES', '歌詞を見返す',
+                    '2026-05-02', 0.95, 0.9,
+                    '[{"note_id":"main-note","quote":"月面探査と機械学習"}]', 'new', '2026-05-21'
+                )
+                """
+            )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+
+    assert "月面探査" in snapshot.overview
+    assert "マスカラ" not in snapshot.overview
+
+
 def _insert_note(
     conn,
     note_id: str,
@@ -337,6 +481,7 @@ def _insert_note(
     *,
     created_at: str,
     source_path: str = "src.md",
+    body: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -350,7 +495,7 @@ def _insert_note(
             note_id,
             f"hash-{note_id}",
             title,
-            f"Body for {title}",
+            body or f"Body for {title}",
             source_path,
             source_path,
             created_at,

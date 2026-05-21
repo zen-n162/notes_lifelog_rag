@@ -7,7 +7,7 @@ from notes_lifelog_rag.timeline.service import (
     MonthTimelineSnapshot,
     ReflectionReport,
     TimelineItem,
-    is_low_priority_timeline_item,
+    timeline_item_display_groups,
 )
 
 
@@ -538,20 +538,14 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
     categories = "".join(f'<span class="note-badge important">{escape(cat)}</span>' for cat in snapshot.dominant_categories)
     changes = "".join(f"<li>{escape(item)}</li>" for item in snapshot.important_changes) or "<li>まだ十分な材料がありません。</li>"
     rediscovery = "".join(f"<li>{escape(item)}</li>" for item in snapshot.rediscovery_points + snapshot.revisit_reasons) or "<li>まだ十分な材料がありません。</li>"
-    main_items = [
-        item
-        for item in snapshot.items
-        if item.item_type != "suggestion" and not is_low_priority_timeline_item(item)
-    ]
-    suggestion_items = [
-        item
-        for item in snapshot.items
-        if item.item_type == "suggestion" and not is_low_priority_timeline_item(item)
-    ]
-    low_priority_items = [item for item in snapshot.items if is_low_priority_timeline_item(item)]
+    groups = timeline_item_display_groups(snapshot.items)
+    main_items = groups["main"]
+    suggestion_items = groups["suggestions"]
+    low_priority_items = groups["low_priority"]
     main_cards = "".join(_render_month_timeline_item(item) for item in main_items[:60])
     suggestion_cards = "".join(_render_month_timeline_item(item) for item in suggestion_items[:20])
     low_priority_cards = "".join(_render_month_timeline_item(item, low_priority=True) for item in low_priority_items[:40])
+    low_priority_summary = f"{len(low_priority_items)} low priority / needs review items"
     return f"""
     <section class="detail-pane">
       <article class="paper">
@@ -594,11 +588,11 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
           <p class="muted">suggestionsは補助素材として最大件数を絞り、overviewの中心には使いません。</p>
           {suggestion_cards or render_empty_state("この月に紐づくsupporting suggestionsはありません。")}
         </section>
-        <section class="paper-section">
-          <h2>Low Priority / Needs Review</h2>
+        <details class="paper-section low-priority-details">
+          <summary>{escape(low_priority_summary)}</summary>
           <p class="muted">歌詞、買い物、PDFノイズ、title-only evidenceなど、月の意味を歪めやすい候補です。</p>
           {low_priority_cards or render_empty_state("低優先レビュー候補はありません。")}
-        </section>
+        </details>
       </article>
     </section>
     """
@@ -607,18 +601,31 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None) -> str:
 def _render_month_timeline_item(item, *, low_priority: bool = False) -> str:
     badges = "".join(f'<span class="note-badge">{escape(value)}</span>' for value in (item.categories + item.themes)[:5])
     extra_class = " low-priority" if low_priority else ""
+    summary = _timeline_item_summary(item)
     return f"""
     <article class="event-card month-item-card{extra_class}">
       <div class="section-title-row">
         <h3>{escape(item.date_label or "日付不明")} · {escape(item.title)}</h3>
         <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
       </div>
-      <p>{escape(item.summary)}</p>
+      <p>{escape(summary)}</p>
       <div class="badge-row"><span class="note-badge important">{escape(item.item_type)}</span>{badges}</div>
       <div class="note-meta"><span>{escape(item.source_note_id[:12])}</span><span>{escape(item.source_table)}</span></div>
       {render_evidence_card(item.evidence)}
     </article>
     """
+
+
+def _timeline_item_summary(item) -> str:
+    summary = str(getattr(item, "summary", "") or "").strip()
+    title = str(getattr(item, "title", "") or "").strip()
+    if summary and not (summary.startswith("#") and len(summary) <= max(40, len(title) + 10)):
+        return summary
+    for row in getattr(item, "evidence", []) or []:
+        quote = str(row.get("quote") or "").strip() if isinstance(row, dict) else ""
+        if len(quote) >= 16 and quote != title:
+            return quote
+    return summary or title
 
 
 def _note_click_attrs(note_id: str, title: str) -> str:

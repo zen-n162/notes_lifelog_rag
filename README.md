@@ -293,10 +293,12 @@ python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --
 python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --force --show-sources
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
+python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich --show-low-priority
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
 python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
 python -m notes_lifelog_rag.cli timeline-qa --all-months
-python -m notes_lifelog_rag.cli timeline-qa --month 2026-05
+python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items
+python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems
 python -m notes_lifelog_rag.cli reflections --month 2026-05 --force
 python -m notes_lifelog_rag.cli generate-reflections --all-months
 ```
@@ -334,6 +336,11 @@ the date of the memory. The month decision now follows this order:
   suggestion is excluded from Timeline.
 - `monthly_reflection`: the stored reflection month.
 
+Each timeline item stores a `date_source` and `date_quality`. Explicit event or
+thought dates are high confidence; source note `created_at` is medium
+confidence and is not treated as suspicious by itself; `modified_at` is a
+lighter signal; unknown or invalid dates trigger `date_attribution_uncertain`.
+
 Suggestions are supporting material, not the main source for a month. By
 default, month generation keeps at most 10 thoughts, 10 events, 10 summaries, 5
 suggestions, and 3 fallback items. You can tune this with
@@ -343,10 +350,32 @@ suggestions, and 3 fallback items. You can tune this with
 
 Low priority items are kept visible for review but are not used to drive the
 month overview, thought summary, event summary, or title. Lyrics/music notes,
-shopping/menu notes, link-only notes, noisy PDF text, title-only evidence, very
-short summaries, weak confidence, and weak importance are marked as
-`low_priority`. In the GUI Timeline detail, these appear under **Low Priority /
+shopping/menu notes, link-only notes, noisy or scanned PDF text, title-only
+evidence, very short summaries, weak confidence, and weak importance are marked
+as `low_priority`. Research PDFs are not low priority just because they are PDF
+files; they are demoted only when the extracted text looks noisy, scanned, or
+low-value. In the GUI Timeline detail, these appear under **Low Priority /
 Needs Review** rather than **Main Timeline Items**.
+
+**Main Timeline Items** are the high-signal thoughts, events, summaries, and
+reflection material used to explain the month. Direct thoughts/events are always
+considered for the month text when they exist, even if the final wording adds a
+caution for low confidence. **Low Priority / Needs Review** remains available
+for audit, but `timeline --month YYYY-MM --rich` shows only the first five by
+default. Use `--show-low-priority` to print all low-priority items, or
+`--hide-low-priority` to suppress them entirely.
+
+Timeline evidence is also enriched from the original note body. If an AI output
+only provides a title-like quote such as `# QST ES`, Timeline tries to extract a
+100-180 character source quote from the note body and marks the item as
+`evidence_enriched`. A remaining `title_only_evidence` warning means the source
+body could not provide a stronger quote and the original note should be checked.
+
+For months like `2026-05`, read the overview as a cautious synthesis of direct
+thoughts/events plus summaries: QST ES, research planning, machine learning,
+moon exploration, and public-interest research support may appear together, but
+low-confidence or noisy PDF-derived items should be reviewed in the low-priority
+section rather than treated as the month theme.
 
 Use `timeline-months` to see month coverage and whether a saved snapshot exists.
 Use `timeline --month 2026-05 --rich` to read a rich month detail. Use
@@ -358,6 +387,8 @@ reasonable confidence, and whether the card is too fallback-heavy. A
 `fallback_heavy` warning means the month card is leaning on note summaries or
 titles because structured thoughts/events are sparse; run `analyze-all`, then
 regenerate the timeline with `generate-timeline --month YYYY-MM --force`.
+Use `timeline-qa --show-items` to inspect which items are main versus
+low-priority, and `--only-problems` to focus on months that still need review.
 Other useful warnings:
 
 - `suggestions_dominated`: suggestions still outnumber direct thought/event/

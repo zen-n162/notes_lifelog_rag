@@ -867,12 +867,22 @@ def timeline_command(
     order: Annotated[str, typer.Option("--order", help="asc or desc.")] = "desc",
     limit: Annotated[int, typer.Option("--limit", help="Maximum timeline items.")] = 100,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in rich output.")] = False,
+    hide_low_priority: Annotated[bool, typer.Option("--hide-low-priority", help="Hide low priority timeline items in rich output.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if rich or monthly or all_months or year:
         if month and not monthly and not all_months:
             snapshot = get_month_timeline_snapshot(month, db_path=db, generate_if_missing=True)
-            console.print(format_month_timeline_markdown(snapshot) if snapshot else "Timeline snapshot not found.")
+            console.print(
+                format_month_timeline_markdown(
+                    snapshot,
+                    show_low_priority=show_low_priority,
+                    hide_low_priority=hide_low_priority,
+                )
+                if snapshot
+                else "Timeline snapshot not found."
+            )
             return
         snapshots = list_month_timeline_snapshots(
             year=year,
@@ -1026,26 +1036,40 @@ def timeline_qa_command(
     month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
     all_months: Annotated[bool, typer.Option("--all-months", help="Check every month.")] = False,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
+    show_items: Annotated[bool, typer.Option("--show-items", help="Show item previews for each QA row.")] = False,
+    only_problems: Annotated[bool, typer.Option("--only-problems", help="Only show months with QA warnings.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if not month and not all_months:
         console.print("[red]Specify --month or --all-months.[/red]")
         raise typer.Exit(code=1)
-    rows = timeline_qa(month=month, all_months=all_months, db_path=db, include_unknown=include_unknown)
+    rows = timeline_qa(
+        month=month,
+        all_months=all_months,
+        db_path=db,
+        include_unknown=include_unknown,
+        show_items=show_items,
+        only_problems=only_problems,
+    )
     table = Table(title="Timeline QA")
     table.add_column("Month")
     table.add_column("Score", justify="right")
     table.add_column("Warnings")
     table.add_column("Source counts")
     table.add_column("Recommended action")
+    if show_items:
+        table.add_column("Items")
     for row in rows:
-        table.add_row(
+        values = [
             row["month"],
             f"{float(row['quality_score']):.2f}",
             ", ".join(row["warnings"]) or "none",
             json.dumps(row["source_counts"], ensure_ascii=False),
             row["recommended_action"],
-        )
+        ]
+        if show_items:
+            values.append(json.dumps(row.get("items") or [], ensure_ascii=False))
+        table.add_row(*values)
     console.print(table)
 
 

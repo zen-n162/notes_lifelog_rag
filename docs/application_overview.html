@@ -579,10 +579,12 @@ python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --
 python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --force --show-sources
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
+python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich --show-low-priority
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
 python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
 python -m notes_lifelog_rag.cli timeline-qa --all-months
-python -m notes_lifelog_rag.cli timeline-qa --month 2026-05
+python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items
+python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems
 python -m notes_lifelog_rag.cli reflections --month 2026-05
 python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
         </section>
@@ -608,10 +610,31 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             1ヶ月あたり最大5件に制限します。
           </p>
           <p>
-            歌詞、買い物、リンクだけのメモ、noisy PDF、title-only evidence、短すぎるsummary、
+            item には <code>date_source</code> と <code>date_quality</code> を保存します。
+            explicit event/thought date は高信頼、source note の <code>created_at</code> は中信頼として扱い、
+            それだけでは <code>date_attribution_uncertain</code> warning を出しません。
+            <code>modified_at</code> だけ、unknown、1900-01 などはレビュー対象になります。
+          </p>
+          <p>
+            歌詞、買い物、リンクだけのメモ、noisy PDF / scan、title-only evidence、短すぎるsummary、
             confidence/importance が低い項目は <code>low_priority</code> として扱い、
             overview や「この月に考えていたこと」の中心素材には使いません。
+            ただし研究論文PDFは、PDFであることだけでは低優先にしません。
+            文字化け、スキャン、奨学金・ごみ収集PDFなど、月の意味を歪めやすいものを重点的に低優先化します。
+          </p>
+          <p>
             GUIでは Main Timeline Items、Supporting Suggestions、Low Priority / Needs Review に分けて表示します。
+            Main Timeline Items は direct thoughts/events と高品質 summaries を中心にし、
+            direct thoughts/events がある月では <code>thought_summary</code> / <code>event_summary</code> に必ず具体項目を反映します。
+            CLI の <code>timeline --rich</code> は Low Priority を最大5件だけ表示し、
+            <code>--show-low-priority</code> で全件、<code>--hide-low-priority</code> で非表示にできます。
+          </p>
+          <p>
+            evidence が <code># QST ES</code> のようなタイトルだけの場合は、元メモ本文から
+            100〜180文字程度の短いquoteを補完し、<code>evidence_enriched</code> として扱います。
+            それでも <code>title_only_evidence</code> が残る場合は、元メモ本文から十分な根拠quoteを取れなかったことを示します。
+            2026-05 のような月では、QST ES、研究計画、機械学習、月面探査、公共性の高い研究支援が
+            direct source としてどう結びつくかを読み、Low Priority のPDF/scan/noisy itemは別枠で確認します。
           </p>
           <p>
             <code>1900-01</code> は日付不明のfallback bucketとして扱い、通常の
