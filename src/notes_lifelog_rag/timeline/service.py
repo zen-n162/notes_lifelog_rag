@@ -898,6 +898,70 @@ def timeline_qa(
     return rows
 
 
+def format_timeline_qa_pretty(rows: list[dict[str, Any]], *, markdown: bool = False) -> str:
+    lines: list[str] = []
+    if markdown:
+        lines.extend(["# Timeline QA Report", ""])
+    if not rows:
+        lines.append("Timeline QA: no problem months found.")
+        return "\n".join(lines).rstrip() + "\n"
+    for row in rows:
+        lines.extend(
+            [
+                f"## {row.get('month') or 'unknown'}",
+                f"Score: {float(row.get('quality_score') or 0.0):.2f}",
+                "Warnings:",
+            ]
+        )
+        warnings = list(row.get("warnings") or [])
+        lines.extend([f"- {warning}" for warning in warnings] or ["- none"])
+        info_warnings = list(row.get("info_warnings") or [])
+        if info_warnings:
+            lines.append("Info:")
+            lines.extend(f"- {warning}" for warning in info_warnings)
+        lines.append("Source counts:")
+        counts = row.get("source_counts") or {}
+        for key in ("notes", "summaries", "events", "thoughts", "suggestions", "monthly_reflections"):
+            if key in counts:
+                lines.append(f"- {key}: {counts.get(key)}")
+        for key, value in counts.items():
+            if key not in {"notes", "summaries", "events", "thoughts", "suggestions", "monthly_reflections", "categories"}:
+                lines.append(f"- {key}: {value}")
+        lines.extend(["Recommended action:", f"- {row.get('recommended_action') or 'Timeline detailを確認してください。'}"])
+        warning_items = row.get("warning_items") or {}
+        lines.append("Problem items:")
+        if warning_items:
+            for warning, items in warning_items.items():
+                lines.append(f"### {warning}")
+                for item in items[:12]:
+                    flags = ", ".join(str(flag) for flag in item.get("quality_flags") or []) or "none"
+                    lines.extend(
+                        [
+                            f"- {item.get('title') or 'Untitled'}",
+                            f"  - source_note_id: {item.get('source_note_id') or ''}",
+                            f"  - item_type: {item.get('item_type') or ''}",
+                            f"  - flags: {flags}",
+                            f"  - reason: {item.get('reason') or ''}",
+                        ]
+                    )
+        else:
+            lines.append("- show with --show-items")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def format_timeline_qa_markdown(rows: list[dict[str, Any]]) -> str:
+    return format_timeline_qa_pretty(rows, markdown=True)
+
+
+def format_timeline_qa_json(rows: list[dict[str, Any]]) -> str:
+    return json.dumps(rows, ensure_ascii=False, indent=2) + "\n"
+
+
+def timeline_qa_problem_items(snapshot: MonthTimelineSnapshot) -> dict[str, list[dict[str, Any]]]:
+    return _timeline_warning_items(snapshot, timeline_item_display_groups(snapshot.items, grouped=True))
+
+
 def _store_reflection(report: ReflectionReport, *, db_path: str | Path | None) -> None:
     init_db(db_path)
     now = datetime.now(tz=timezone.utc).isoformat()

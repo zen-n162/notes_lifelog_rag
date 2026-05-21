@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+from typer.testing import CliRunner
+
 from notes_lifelog_rag.analysis.service import analyze_all
+from notes_lifelog_rag.cli import app
 from notes_lifelog_rag.db.schema import connect, init_db, table_count
 from notes_lifelog_rag.ingest.importer import ingest_directory
 from notes_lifelog_rag.timeline.service import (
@@ -11,6 +14,7 @@ from notes_lifelog_rag.timeline.service import (
     build_timeline,
     format_month_timeline_markdown,
     format_reflection_markdown,
+    format_timeline_qa_pretty,
     format_timeline_report,
     format_timeline_markdown,
     generate_month_timeline_snapshot,
@@ -24,6 +28,7 @@ from notes_lifelog_rag.timeline.service import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes_export"
+RUNNER = CliRunner()
 
 
 def test_timeline_and_reflection_include_evidence_confidence_importance(tmp_path: Path) -> None:
@@ -776,6 +781,134 @@ def test_generated_date_suggestion_is_excluded_when_no_target_or_evidence_date(t
     assert "generated_date_used_for_suggestion" not in snapshot.quality["warnings"]
 
 
+def test_timeline_qa_markdown_and_json_outputs_include_problem_items(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "scan-note", "スキャンPDF", created_at="2026-05-01", source_path="scan.pdf")
+        _insert_summary(
+            conn,
+            "scan-note",
+            generated_title="スキャンPDF",
+            one_line_summary="｜｜｜ ノイズ断片",
+            importance=0.8,
+        )
+        conn.commit()
+    generate_month_timeline_snapshot("2026-05", db_path=db_path, force=True)
+
+    markdown_path = tmp_path / "timeline_qa.md"
+    json_path = tmp_path / "timeline_qa.json"
+    md_result = RUNNER.invoke(
+        app,
+        [
+            "timeline-qa",
+            "--month",
+            "2026-05",
+            "--show-items",
+            "--format",
+            "markdown",
+            "--output",
+            str(markdown_path),
+            "--db",
+            str(db_path),
+        ],
+    )
+    json_result = RUNNER.invoke(
+        app,
+        [
+            "timeline-qa",
+            "--month",
+            "2026-05",
+            "--format",
+            "json",
+            "--output",
+            str(json_path),
+            "--db",
+            str(db_path),
+        ],
+    )
+
+    assert md_result.exit_code == 0, md_result.output
+    assert json_result.exit_code == 0, json_result.output
+    markdown = markdown_path.read_text(encoding="utf-8")
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "# Timeline QA Report" in markdown
+    assert "Problem items:" in markdown
+    assert "source_note_id:" in markdown
+    assert "flags:" in markdown
+    assert '"warning_items"' not in markdown
+    assert data and data[0]["month"] == "2026-05"
+    assert data[0]["warning_items"]
+    first_problem = next(iter(data[0]["warning_items"].values()))[0]
+    assert first_problem["source_note_id"] == "scan-note"
+    assert first_problem["quality_flags"]
+
+
+def test_timeline_qa_pretty_output_is_not_inline_json(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "scan-note", "スキャンPDF", created_at="2026-05-01", source_path="scan.pdf")
+        _insert_summary(
+            conn,
+            "scan-note",
+            generated_title="スキャンPDF",
+            one_line_summary="｜｜｜ ノイズ断片",
+            importance=0.8,
+        )
+        conn.commit()
+    qa_rows = timeline_qa(month="2026-05", db_path=db_path, show_items=True)
+    pretty = format_timeline_qa_pretty(qa_rows)
+
+    assert "## 2026-05" in pretty
+    assert "Problem items:" in pretty
+    assert "source_note_id:" in pretty
+    assert '{"' not in pretty
+
+
+def test_timeline_qa_only_problems_and_month_filter(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "clean-note", "研究計画", created_at="2026-05-01")
+        _insert_summary(
+            conn,
+            "clean-note",
+            generated_title="研究計画",
+            one_line_summary="月面探査と機械学習に関する研究計画を整理した。",
+            source_quote="月面探査と機械学習に関する研究計画を整理した。",
+            importance=0.9,
+        )
+        for index in range(2):
+            _insert_event(conn, "clean-note", f"研究イベント{index}", confidence=0.9, importance=0.8)
+            _insert_thought(conn, "clean-note", f"研究思考{index}", confidence=0.9, importance=0.8)
+        _insert_note(conn, "problem-note", "スキャンPDF", created_at="2026-06-01", source_path="scan.pdf")
+        _insert_summary(
+            conn,
+            "problem-note",
+            generated_title="スキャンPDF",
+            one_line_summary="｜｜｜ ノイズ断片",
+            importance=0.8,
+        )
+        conn.commit()
+
+    clean_result = RUNNER.invoke(
+        app,
+        ["timeline-qa", "--all-months", "--only-problems", "--format", "json", "--db", str(db_path)],
+    )
+    month_result = RUNNER.invoke(
+        app,
+        ["timeline-qa", "--month", "2026-06", "--format", "json", "--db", str(db_path)],
+    )
+
+    assert clean_result.exit_code == 0, clean_result.output
+    data = json.loads(clean_result.output)
+    assert [row["month"] for row in data] == ["2026-06"]
+    assert month_result.exit_code == 0, month_result.output
+    month_data = json.loads(month_result.output)
+    assert [row["month"] for row in month_data] == ["2026-06"]
+
+
 def _insert_note(
     conn,
     note_id: str,
@@ -831,5 +964,59 @@ def _insert_summary(
             one_line_summary,
             importance,
             json.dumps([{"note_id": note_id, "quote": source_quote or one_line_summary[:60]}]),
+        ),
+    )
+
+
+def _insert_event(
+    conn,
+    note_id: str,
+    title: str,
+    *,
+    confidence: float,
+    importance: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO events(
+            note_id, title, summary, event_type, event_date, date_label,
+            date_confidence, importance, confidence, evidence_json, created_at
+        )
+        VALUES (?, ?, ?, 'research', '2026-05-01', '2026-05-01', 'high', ?, ?, ?, '2026-05-01')
+        """,
+        (
+            note_id,
+            title,
+            f"{title}を進めた。",
+            importance,
+            confidence,
+            json.dumps([{"note_id": note_id, "quote": f"{title}について、月面探査と機械学習の研究方針を整理した。"}]),
+        ),
+    )
+
+
+def _insert_thought(
+    conn,
+    note_id: str,
+    title: str,
+    *,
+    confidence: float,
+    importance: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO thoughts(
+            note_id, title, summary, thought_type, themes_json, emotion_label,
+            emotion_intensity, importance, confidence, remember_reason, evidence_json, created_at
+        )
+        VALUES (?, ?, ?, 'research', '["研究"]', '', 0.0, ?, ?, '研究方針を見返す', ?, '2026-05-01')
+        """,
+        (
+            note_id,
+            title,
+            f"{title}について考えた。",
+            importance,
+            confidence,
+            json.dumps([{"note_id": note_id, "quote": f"{title}について、月面探査と機械学習の研究方針を整理した。"}]),
         ),
     )

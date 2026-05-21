@@ -35,6 +35,9 @@ from notes_lifelog_rag.timeline.service import (
     build_timeline,
     format_month_timeline_markdown,
     format_reflection_markdown,
+    format_timeline_qa_json,
+    format_timeline_qa_markdown,
+    format_timeline_qa_pretty,
     format_timeline_report,
     format_timeline_markdown,
     generate_month_timeline_snapshot,
@@ -1068,19 +1071,48 @@ def timeline_qa_command(
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
     show_items: Annotated[bool, typer.Option("--show-items", help="Show item previews for each QA row.")] = False,
     only_problems: Annotated[bool, typer.Option("--only-problems", help="Only show months with QA warnings.")] = False,
+    format_name: Annotated[str, typer.Option("--format", help="Output format: table, pretty, markdown, or json.")] = "table",
+    output: Annotated[Path | None, typer.Option("--output", help="Write QA output to a file.")] = None,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     if not month and not all_months:
         console.print("[red]Specify --month or --all-months.[/red]")
+        raise typer.Exit(code=1)
+    format_value = format_name.lower().strip()
+    if format_value not in {"table", "pretty", "markdown", "json"}:
+        console.print("[red]--format must be one of: table, pretty, markdown, json[/red]")
         raise typer.Exit(code=1)
     rows = timeline_qa(
         month=month,
         all_months=all_months,
         db_path=db,
         include_unknown=include_unknown,
-        show_items=show_items,
+        show_items=show_items or format_value in {"pretty", "markdown", "json"},
         only_problems=only_problems,
     )
+    if format_value == "json":
+        rendered = format_timeline_qa_json(rows)
+        if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+            console.print(f"[green]Wrote timeline QA JSON:[/green] {output}")
+        else:
+            typer.echo(rendered.rstrip())
+        return
+    if format_value in {"pretty", "markdown"}:
+        rendered = format_timeline_qa_markdown(rows) if format_value == "markdown" else format_timeline_qa_pretty(rows)
+        if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+            console.print(f"[green]Wrote timeline QA report:[/green] {output}")
+        else:
+            typer.echo(rendered.rstrip())
+        return
+    if output:
+        rendered = format_timeline_qa_pretty(rows)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8")
+        console.print(f"[green]Wrote timeline QA report:[/green] {output}")
     table = Table(title="Timeline QA")
     table.add_column("Month")
     table.add_column("Score", justify="right")

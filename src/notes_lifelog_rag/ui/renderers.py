@@ -7,6 +7,7 @@ from notes_lifelog_rag.timeline.service import (
     MonthTimelineSnapshot,
     ReflectionReport,
     TimelineItem,
+    timeline_qa_problem_items,
     timeline_item_display_groups,
     visible_timeline_flags,
 )
@@ -504,8 +505,13 @@ def render_timeline_month_cards(
             f'<span class="note-badge review">{escape(str(warning))}</span>'
             for warning in (snapshot.quality.get("warnings") or [])[:3]
         )
+        info_badges = "".join(
+            f'<span class="note-badge">{escape(str(warning))}</span>'
+            for warning in (snapshot.quality.get("info_warnings") or [])[:2]
+        )
         themes = "".join(f'<span class="note-badge">{escape(theme)}</span>' for theme in snapshot.key_themes[:5])
         counts = snapshot.source_counts
+        qa_score = float(snapshot.quality.get("quality_score") or 0.0)
         cards.append(
             f"""
             <article class="timeline-month-card note-card {selected}" role="button" tabindex="0"
@@ -513,12 +519,12 @@ def render_timeline_month_cards(
               aria-label="Open timeline month {escape(snapshot.month, quote=True)}">
               <div class="section-title-row">
                 <h3>{escape(snapshot.month)} · {escape(snapshot.title)}</h3>
-                <div>{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}</div>
+                <div>{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}<span class="score-pill">QA {qa_score:.2f}</span></div>
               </div>
               <p class="note-snippet">{escape(snapshot.overview)}</p>
               <p class="note-snippet"><b>Thoughts</b>: {escape(snapshot.thought_summary)}</p>
               <p class="note-snippet"><b>Events</b>: {escape(snapshot.event_summary)}</p>
-              <div class="badge-row">{themes}{warning_badges}</div>
+              <div class="badge-row">{themes}{warning_badges}{info_badges}</div>
               <div class="note-meta">
                 <span>notes {int(counts.get("notes", 0))}</span>
                 <span>events {int(counts.get("events", 0))}</span>
@@ -550,6 +556,7 @@ def render_month_timeline_detail(
     changes = "".join(f"<li>{escape(item)}</li>" for item in snapshot.important_changes) or "<li>まだ十分な材料がありません。</li>"
     rediscovery = "".join(f"<li>{escape(item)}</li>" for item in snapshot.rediscovery_points + snapshot.revisit_reasons) or "<li>まだ十分な材料がありません。</li>"
     groups = timeline_item_display_groups(snapshot.items, grouped=grouped)
+    problem_items = timeline_qa_problem_items(snapshot)
     main_items = groups["main"]
     suggestion_items = groups["suggestions"]
     low_priority_items = groups["low_priority"]
@@ -560,6 +567,7 @@ def render_month_timeline_detail(
     low_priority_summary = f"{len(low_priority_items)} low priority / needs review items"
     low_priority_reasons = _reason_badges(low_priority_items)
     low_priority_note = "" if show_low_priority else '<p class="muted">show low priority をオンにすると全件表示します。</p>'
+    qa_problem_html = _render_timeline_qa_problem_items(problem_items)
     mode_badge = "Grouped view" if grouped else "Ungrouped raw items"
     return f"""
     <section class="detail-pane">
@@ -597,6 +605,11 @@ def render_month_timeline_detail(
           <h2>Main Timeline Items</h2>
           <p class="muted">thought / event / note summary を優先して構成した、この月の中心素材です。</p>
           {main_cards or render_empty_state("この月の中心itemsはまだありません。")}
+        </section>
+        <section class="paper-section">
+          <h2>Timeline QA</h2>
+          <p class="muted">月別QA score、warnings、problem itemsです。source noteをクリックすると下にdetail previewを表示します。</p>
+          {qa_problem_html}
         </section>
         <section class="paper-section">
           <h2>Supporting Suggestions</h2>
@@ -646,6 +659,42 @@ def _reason_badges(items) -> str:
             counts[flag] = counts.get(flag, 0) + 1
     values = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:6]
     return "".join(f'<span class="note-badge review">{escape(flag)} {count}</span>' for flag, count in values)
+
+
+def _render_timeline_qa_problem_items(problem_items: dict[str, list[dict[str, Any]]]) -> str:
+    if not problem_items:
+        return render_empty_state("この月のTimeline QA problem itemsはありません。")
+    sections = []
+    for warning, items in problem_items.items():
+        rows = []
+        for item in items[:8]:
+            title = str(item.get("title") or "Untitled")
+            note_id = str(item.get("source_note_id") or "")
+            flags = item.get("quality_flags") or []
+            flag_badges = "".join(f'<span class="note-badge review">{escape(str(flag))}</span>' for flag in flags[:8])
+            click_attrs = _note_click_attrs(note_id, title)
+            rows.append(
+                f"""
+                <article class="note-card event-card qa-problem-item"{click_attrs}>
+                  <div class="section-title-row">
+                    <h3>{escape(title)}</h3>
+                    <span class="note-badge important">{escape(str(item.get("item_type") or ""))}</span>
+                  </div>
+                  <div class="badge-row">{flag_badges}</div>
+                  <p class="muted">{escape(str(item.get("reason") or ""))}</p>
+                  <div class="note-meta"><span>{escape(note_id[:12])}</span><span>{escape(str(warning))}</span></div>
+                </article>
+                """
+            )
+        sections.append(
+            f"""
+            <details class="qa-warning-group" open>
+              <summary>{escape(str(warning))} · {len(items)} items</summary>
+              {''.join(rows)}
+            </details>
+            """
+        )
+    return '<section class="timeline-qa-problems">' + "".join(sections) + "</section>"
 
 
 def _timeline_item_summary(item) -> str:

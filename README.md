@@ -426,6 +426,27 @@ titles because structured thoughts/events are sparse; run `analyze-all`, then
 regenerate the timeline with `generate-timeline --month YYYY-MM --force`.
 Use `timeline-qa --show-items` to inspect which items are main versus
 low-priority, and `--only-problems` to focus on months that still need review.
+Phase 8 adds review-friendly output formats:
+
+```bash
+python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items --format pretty
+python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --show-items --format markdown \
+  --output data/exports/timelines/timeline_qa_report.md
+python -m notes_lifelog_rag.cli timeline-qa --all-months --format json \
+  --output data/exports/timelines/timeline_qa_report.json
+```
+
+`--format table` keeps the compact Rich table. `--format pretty` prints one
+month at a time with score, warnings, source counts, recommended action, and
+problem items. `--format markdown` writes the same review structure as a report.
+`--format json` keeps `warning_items` machine-readable for later processing.
+When using `--show-items`, each problem item includes `title`, `item_type`,
+`source_note_id`, `quality_flags`, and a short reason. The recommended manual
+review flow is: run `generate-timeline --all-months --backend rule`, export a
+Markdown QA report with `--only-problems --show-items`, review noisy/low
+confidence months in the GUI Timeline tab, then open the source note detail from
+the problem item.
+
 Other useful warnings:
 
 - `suggestions_dominated`: suggestions still outnumber direct thought/event/

@@ -586,6 +586,9 @@ python -m notes_lifelog_rag.cli timeline-report --year 2026 --grouped --low-prio
 python -m notes_lifelog_rag.cli timeline-qa --all-months
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items
 python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems
+python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items --format pretty
+python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --show-items --format markdown --output data/exports/timelines/timeline_qa_report.md
+python -m notes_lifelog_rag.cli timeline-qa --all-months --format json --output data/exports/timelines/timeline_qa_report.json
 python -m notes_lifelog_rag.cli reflections --month 2026-05
 python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
         </section>
@@ -676,6 +679,11 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             <code>timeline-qa --show-items</code> はwarningごとの該当itemとreasonを表示します。
             Suggestionsは生成日ではなくtarget dateまたはevidence note dateで月帰属し、
             それが取れない場合はTimeline main sourceから外します。
+            Phase 8では <code>--format table|pretty|markdown|json</code> と
+            <code>--output</code> を追加し、横長JSONではなく月ごとのreview reportとして読めるようにしました。
+            Markdown reportは人間の確認用、JSON reportは後続処理用です。
+            GUI Timeline detailにもQA score、warning badges、problem items、source_note_idを表示し、
+            problem itemから元メモdetail previewを開けます。
           </p>
           <p>
             GUI の Timeline タブでは Year / Month / Category / Theme / Item type / Sort を選び、
