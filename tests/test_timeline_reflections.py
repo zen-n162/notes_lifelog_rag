@@ -19,6 +19,7 @@ from notes_lifelog_rag.timeline.service import (
     list_timeline_months,
     timeline_qa,
     timeline_item_display_groups,
+    visible_timeline_flags,
 )
 
 
@@ -604,6 +605,175 @@ def test_suggestions_do_not_contribute_to_overview(tmp_path: Path) -> None:
 
     assert "月面探査" in snapshot.overview
     assert "マスカラ" not in snapshot.overview
+
+
+def test_source_note_id_is_short_ref_and_recovered_from_evidence(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    long_id = "dd2217df77ccbce3e922f698ba9dd7b4a0e6b2dacb5d658f5fd617e034efbaa9"
+    with connect(db_path) as conn:
+        _insert_note(conn, long_id, "QST ES", created_at="2026-05-03")
+        _insert_summary(
+            conn,
+            long_id,
+            generated_title="QST ES",
+            one_line_summary="QST ESを整理した。",
+            importance=0.9,
+        )
+        conn.execute(
+            """
+            INSERT INTO suggestions(
+                note_id, suggestion_type, title, message, target_date, importance,
+                confidence, evidence_json, status, created_at
+            )
+            VALUES (
+                    NULL, 'important_thought', 'QST ES再確認', 'QST ESを見返す',
+                '', 0.9, 0.8, ?, 'new', '2026-05-21'
+            )
+            """,
+            (json.dumps([{"note_id": long_id, "quote": "QST ESを整理した。"}]),),
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, force=True)
+    assert any(item.source_note_id == "dd2217df77cc" for item in snapshot.items)
+    assert any(
+        item.item_type == "suggestion" and item.source_note_id == "dd2217df77cc"
+        for item in snapshot.items
+    )
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT source_note_id, evidence_json, grouped_item_ids_json, sub_items_json
+            FROM monthly_timeline_items
+            WHERE month='2026-05' AND source_note_id='dd2217df77cc'
+            """
+        ).fetchall()
+    assert rows
+    assert any("dd2217df77cc" in row["evidence_json"] for row in rows)
+    assert all(row["grouped_item_ids_json"] for row in rows)
+
+
+def test_grouped_flags_are_filtered_but_ungrouped_keeps_duplicate_flag(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "qst-note", "QST ES", created_at="2026-05-03")
+        _insert_summary(
+            conn,
+            "qst-note",
+            generated_title="QST ES",
+            one_line_summary="QST ESで研究経験と志望動機、自己PRを整理した。",
+            importance=0.9,
+        )
+        conn.execute(
+            """
+            INSERT INTO events(
+                note_id, title, summary, event_type, event_date, date_label,
+                date_confidence, importance, confidence, evidence_json, created_at
+            )
+            VALUES ('qst-note', '自己PR', '自己PRを整理した。', 'section', '2026-05-03', '2026-05-03', 'high', 0.2, 0.3,
+                    '[{"note_id":"qst-note","quote":"自己PR"}]', '2026-05-03')
+            """
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    grouped_item = next(item for item in timeline_item_display_groups(snapshot.items, grouped=True)["main"] if "QST ES" in item.title)
+    ungrouped_item = next(item for item in timeline_item_display_groups(snapshot.items, grouped=False)["main"] if item.source_note_id == "qst-note")
+
+    assert "duplicate_same_note" in grouped_item.quality_flags
+    assert "duplicate_same_note" not in visible_timeline_flags(grouped_item)
+    assert "duplicate_same_note" in visible_timeline_flags(ungrouped_item, grouped=False)
+
+
+def test_hide_low_priority_summarizes_reasons_without_titles(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        for index in range(4):
+            note_id = f"scan-{index}"
+            _insert_note(conn, note_id, f"スキャンPDF {index}", created_at="2026-05-01", source_path=f"scan-{index}.pdf")
+            _insert_summary(
+                conn,
+                note_id,
+                generated_title=f"スキャンPDF {index}",
+                one_line_summary=f"｜｜｜ ノイズ断片 {index}",
+                importance=0.8,
+            )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+    hidden = format_month_timeline_markdown(snapshot, hide_low_priority=True)
+    shown = format_month_timeline_markdown(snapshot, show_low_priority=True)
+
+    assert "主な理由:" in hidden
+    assert "表示するには --show-low-priority" in hidden
+    assert "スキャンPDF 3" not in hidden
+    assert "スキャンPDF 3" in shown
+
+
+def test_date_modified_only_is_info_warning_and_qa_links_warning_items(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO notes(
+                id, content_hash, title, body, source_path, source_relative_path, file_type,
+                created_at, modified_at, imported_at, note_date, parser_name
+            )
+            VALUES (
+                'modified-note', 'hash-modified', 'Modified only note', 'modified body',
+                'src.md', 'src.md', 'md', '2026-05-21', '2026-04-10', '2026-05-21', '', 'test'
+            )
+            """
+        )
+        _insert_summary(
+            conn,
+            "modified-note",
+            generated_title="Modified only note",
+            one_line_summary="modified_atで月に帰属するメモ。",
+            importance=0.8,
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-04", db_path=db_path, force=True)
+    qa = timeline_qa(month="2026-04", db_path=db_path, show_items=True)[0]
+
+    assert "date_modified_only" in snapshot.quality["info_warnings"]
+    assert "date_modified_only" not in snapshot.quality["warnings"]
+    assert "date_modified_only" in qa["info_warnings"]
+    assert "date_modified_only" in qa["warning_items"]
+
+
+def test_generated_date_suggestion_is_excluded_when_no_target_or_evidence_date(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    init_db(db_path)
+    with connect(db_path) as conn:
+        _insert_note(conn, "main-note", "研究計画", created_at="2026-04-01")
+        _insert_summary(
+            conn,
+            "main-note",
+            generated_title="研究計画",
+            one_line_summary="研究計画を整理した。",
+            importance=0.8,
+        )
+        conn.execute(
+            """
+            INSERT INTO suggestions(
+                note_id, suggestion_type, title, message, target_date, importance,
+                confidence, evidence_json, status, created_at
+            )
+            VALUES (NULL, 'revisit_note', '生成日だけのsuggestion', '生成日だけ', '', 0.9, 0.9, '[]', 'new', '2026-05-21')
+            """
+        )
+        conn.commit()
+
+    snapshot = generate_month_timeline_snapshot("2026-05", db_path=db_path, dry_run=True)
+
+    assert not any(item.item_type == "suggestion" and item.title == "生成日だけのsuggestion" for item in snapshot.items)
+    assert "generated_date_used_for_suggestion" not in snapshot.quality["warnings"]
 
 
 def _insert_note(

@@ -8,6 +8,7 @@ from notes_lifelog_rag.timeline.service import (
     ReflectionReport,
     TimelineItem,
     timeline_item_display_groups,
+    visible_timeline_flags,
 )
 
 
@@ -530,10 +531,20 @@ def render_timeline_month_cards(
     return '<section class="note-list timeline-month-list">' + "".join(cards) + "</section>"
 
 
-def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None, *, grouped: bool = True) -> str:
+def render_month_timeline_detail(
+    snapshot: MonthTimelineSnapshot | None,
+    *,
+    grouped: bool = True,
+    show_low_priority: bool = False,
+    low_priority_limit: int = 3,
+) -> str:
     if snapshot is None:
         return render_empty_state("月を選択してください。")
-    warnings = "".join(render_warning_banner(str(item)) for item in (snapshot.quality.get("warnings") or [])[:5])
+    review_warnings = snapshot.quality.get("review_warnings") or snapshot.quality.get("warnings") or []
+    severe_warnings = snapshot.quality.get("severe_warnings") or []
+    info_warnings = snapshot.quality.get("info_warnings") or []
+    warnings = "".join(render_warning_banner(str(item)) for item in (severe_warnings + review_warnings)[:5])
+    info_badges = "".join(f'<span class="note-badge">{escape(str(item))}</span>' for item in info_warnings[:4])
     themes = "".join(f'<span class="note-badge">{escape(theme)}</span>' for theme in snapshot.key_themes)
     categories = "".join(f'<span class="note-badge important">{escape(cat)}</span>' for cat in snapshot.dominant_categories)
     changes = "".join(f"<li>{escape(item)}</li>" for item in snapshot.important_changes) or "<li>まだ十分な材料がありません。</li>"
@@ -542,17 +553,20 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None, *, grou
     main_items = groups["main"]
     suggestion_items = groups["suggestions"]
     low_priority_items = groups["low_priority"]
-    main_cards = "".join(_render_month_timeline_item(item) for item in main_items[:60])
-    suggestion_cards = "".join(_render_month_timeline_item(item) for item in suggestion_items[:20])
-    low_priority_cards = "".join(_render_month_timeline_item(item, low_priority=True) for item in low_priority_items[:40])
+    main_cards = "".join(_render_month_timeline_item(item, grouped=grouped) for item in main_items[:60])
+    suggestion_cards = "".join(_render_month_timeline_item(item, grouped=grouped) for item in suggestion_items[:20])
+    low_priority_visible = low_priority_items if show_low_priority else low_priority_items[: max(0, int(low_priority_limit))]
+    low_priority_cards = "".join(_render_month_timeline_item(item, low_priority=True, grouped=grouped) for item in low_priority_visible)
     low_priority_summary = f"{len(low_priority_items)} low priority / needs review items"
+    low_priority_reasons = _reason_badges(low_priority_items)
+    low_priority_note = "" if show_low_priority else '<p class="muted">show low priority をオンにすると全件表示します。</p>'
     mode_badge = "Grouped view" if grouped else "Ungrouped raw items"
     return f"""
     <section class="detail-pane">
       <article class="paper">
         <div class="paper-kicker">Monthly Timeline Snapshot</div>
         <h1 class="paper-title">{escape(snapshot.month)} · {escape(snapshot.title)}</h1>
-        <div class="metric-row">{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}<span class="score-pill">quality {float(snapshot.quality.get("quality_score") or 0.0):.2f}</span><span class="score-pill">{escape(mode_badge)}</span></div>
+        <div class="metric-row">{render_confidence_pill(snapshot.confidence)}{render_importance_pill(snapshot.importance)}<span class="score-pill">quality {float(snapshot.quality.get("quality_score") or 0.0):.2f}</span><span class="score-pill">{escape(mode_badge)}</span>{info_badges}</div>
         {warnings}
         <section class="ai-summary-card">
           <h2>この月の概要</h2>
@@ -592,6 +606,8 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None, *, grou
         <details class="paper-section low-priority-details">
           <summary>{escape(low_priority_summary)}</summary>
           <p class="muted">歌詞、買い物、PDFノイズ、title-only evidenceなど、月の意味を歪めやすい候補です。</p>
+          <div class="badge-row">{low_priority_reasons}</div>
+          {low_priority_note}
           {low_priority_cards or render_empty_state("低優先レビュー候補はありません。")}
         </details>
       </article>
@@ -599,15 +615,17 @@ def render_month_timeline_detail(snapshot: MonthTimelineSnapshot | None, *, grou
     """
 
 
-def _render_month_timeline_item(item, *, low_priority: bool = False) -> str:
+def _render_month_timeline_item(item, *, low_priority: bool = False, grouped: bool = True) -> str:
     badges = "".join(f'<span class="note-badge">{escape(value)}</span>' for value in (item.categories + item.themes)[:5])
-    flag_badges = "".join(f'<span class="note-badge review">{escape(value)}</span>' for value in getattr(item, "quality_flags", [])[:6])
+    flags = visible_timeline_flags(item, low_priority=low_priority, grouped=grouped)
+    flag_badges = "".join(f'<span class="note-badge review">{escape(value)}</span>' for value in flags[:8])
     extra_class = " low-priority" if low_priority else ""
     summary = _timeline_item_summary(item)
     sub_count = len(getattr(item, "sub_items", []) or [])
     sub_meta = f"<span>sub items {sub_count}</span>" if sub_count else ""
+    click_attrs = _note_click_attrs(item.source_note_id, item.title)
     return f"""
-    <article class="event-card month-item-card{extra_class}">
+    <article class="note-card event-card month-item-card{extra_class}"{click_attrs}>
       <div class="section-title-row">
         <h3>{escape(item.date_label or "日付不明")} · {escape(item.title)}</h3>
         <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
@@ -619,6 +637,15 @@ def _render_month_timeline_item(item, *, low_priority: bool = False) -> str:
       {render_evidence_card(item.evidence)}
     </article>
     """
+
+
+def _reason_badges(items) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        for flag in getattr(item, "quality_flags", []) or []:
+            counts[flag] = counts.get(flag, 0) + 1
+    values = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:6]
+    return "".join(f'<span class="note-badge review">{escape(flag)} {count}</span>' for flag, count in values)
 
 
 def _timeline_item_summary(item) -> str:

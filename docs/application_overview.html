@@ -629,7 +629,7 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             direct thoughts/events がある月では <code>thought_summary</code> / <code>event_summary</code> に必ず具体項目を反映します。
             CLI の <code>timeline --rich</code> は Low Priority を最大3件だけ表示し、
             <code>--low-priority-limit N</code> で件数変更、<code>--show-low-priority</code> で全件、
-            <code>--hide-low-priority</code> で非表示にできます。
+            <code>--hide-low-priority</code> で件数と主な理由だけに折りたためます。
           </p>
           <p>
             rich output と timeline report は grouped view をデフォルトにしています。
@@ -639,6 +639,10 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             が同じnoteから出た場合、表示上は「QST ES・自己PR・志望動機の整理」のような1枚の記憶カードになります。
             生の抽出itemを確認したい場合だけ <code>--ungrouped</code> またはGUIの
             “show ungrouped items” を使います。
+            <code>monthly_timeline_items.source_note_id</code> にはUI/CLIで表示する短いnote参照を保存するため、
+            <code>WHERE source_note_id='dd2217df77cc'</code> のような確認ができます。
+            <code>grouped_item_ids_json</code> と <code>sub_items_json</code> も保存し、
+            grouped itemの代表sourceとsub itemのsourceを追えるようにしています。
           </p>
           <p>
             Low Priority item には <code>quality_flags_json</code> を保存し、
@@ -646,6 +650,10 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             <code>low_confidence</code>、<code>low_importance</code>、
             <code>weak_evidence</code>、<code>section_fragment</code>、
             <code>duplicate_same_note</code>、<code>date_uncertain</code> などの理由を表示します。
+            ただし grouped view の Main Items では <code>duplicate_same_note</code> や
+            <code>section_fragment</code> は内部的な統合情報として扱い、警告badgeとしては出しません。
+            Main Items は <code>low_confidence</code>、<code>weak_evidence</code>、
+            <code>date_uncertain</code> だけを控えめに表示し、Low Priorityでは詳細flagsを表示します。
           </p>
           <p>
             evidence が <code># QST ES</code> のようなタイトルだけの場合は、元メモ本文から
@@ -664,6 +672,10 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             <code>low_direct_thoughts</code>, <code>low_direct_events</code>,
             <code>noisy_items_present</code>, <code>low_value_items_present</code>,
             <code>date_attribution_uncertain</code>, <code>invalid_month_1900</code> です。
+            <code>date_modified_only</code> はApple Notes由来では自然に起きるためinfo badge扱いです。
+            <code>timeline-qa --show-items</code> はwarningごとの該当itemとreasonを表示します。
+            Suggestionsは生成日ではなくtarget dateまたはevidence note dateで月帰属し、
+            それが取れない場合はTimeline main sourceから外します。
           </p>
           <p>
             GUI の Timeline タブでは Year / Month / Category / Theme / Item type / Sort を選び、

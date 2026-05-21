@@ -340,7 +340,9 @@ the date of the memory. The month decision now follows this order:
 Each timeline item stores a `date_source` and `date_quality`. Explicit event or
 thought dates are high confidence; source note `created_at` is medium
 confidence and is not treated as suspicious by itself; `modified_at` is a
-lighter signal; unknown or invalid dates trigger `date_attribution_uncertain`.
+lighter signal. When `modified_at` is the only usable source, Timeline records
+`date_modified_only` as an info-level warning rather than a severe review
+failure. Unknown or invalid dates still trigger `date_attribution_uncertain`.
 
 Suggestions are supporting material, not the main source for a month. By
 default, month generation keeps at most 10 thoughts, 10 events, 10 summaries, 5
@@ -365,8 +367,9 @@ caution for low confidence. **Low Priority / Needs Review** remains available
 for audit, but `timeline --month YYYY-MM --rich` shows only the first three by
 default. Use `--low-priority-limit N` to change that count,
 `--show-low-priority` to print all low-priority items, or
-`--hide-low-priority` to suppress them entirely. Low-priority rows include
-reason flags such as `noisy_pdf`, `scanned_document`, `mojibake`,
+`--hide-low-priority` to collapse the list into a count and the most common
+reasons. Low-priority rows include reason flags such as `noisy_pdf`,
+`scanned_document`, `mojibake`,
 `shopping_list`, `lyric_or_song`, `low_confidence`, `low_importance`,
 `weak_evidence`, `section_fragment`, `duplicate_same_note`, and
 `date_uncertain`.
@@ -378,6 +381,21 @@ note can group `QST ES`, `QST ES の考え`, `自己PR`, `志望動機`, `趣味
 `特技` into a single **QST ES・自己PR・志望動機の整理** card with `sub_items`.
 Use `--ungrouped` when you need to audit every raw extracted item. Use
 `--grouped` explicitly when you want to make the default visible in scripts.
+Raw `monthly_timeline_items.source_note_id` stores the same short note reference
+shown in the UI/CLI, so queries like `WHERE source_note_id='dd2217df77cc'` work
+after `generate-timeline --force`. The raw table also stores
+`grouped_item_ids_json` and `sub_items_json` for source-note groups. In grouped
+view, `duplicate_same_note` is treated as an internal grouping signal and is not
+shown as a main-item warning badge; ungrouped audit output still shows it.
+Main item flags are intentionally quiet (`low_confidence`, `weak_evidence`,
+`date_uncertain`), while Low Priority keeps the full detailed flag list.
+
+`timeline-qa --show-items` now reports warning-linked items by warning type,
+including title, item type, `source_note_id`, quality flags, and reason. This is
+the quickest way to see which PDF/scan/noisy item caused a month-level warning.
+Suggestions never use `suggestions.created_at` for month attribution; they use a
+valid target date or evidence note date, otherwise they are excluded or kept out
+of the main monthly material.
 
 Timeline evidence is also enriched from the original note body. If an AI output
 only provides a title-like quote such as `# QST ES`, Timeline tries to extract a

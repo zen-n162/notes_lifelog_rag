@@ -1085,20 +1085,22 @@ def timeline_qa_command(
     table.add_column("Month")
     table.add_column("Score", justify="right")
     table.add_column("Warnings")
+    table.add_column("Info")
     table.add_column("Source counts")
     table.add_column("Recommended action")
     if show_items:
-        table.add_column("Items")
+        table.add_column("Warning-linked items")
     for row in rows:
         values = [
             row["month"],
             f"{float(row['quality_score']):.2f}",
             ", ".join(row["warnings"]) or "none",
+            ", ".join(row.get("info_warnings") or []) or "none",
             json.dumps(row["source_counts"], ensure_ascii=False),
             row["recommended_action"],
         ]
         if show_items:
-            values.append(json.dumps(row.get("items") or [], ensure_ascii=False))
+            values.append(json.dumps(row.get("warning_items") or row.get("items") or [], ensure_ascii=False))
         table.add_row(*values)
     console.print(table)
 

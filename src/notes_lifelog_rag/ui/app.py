@@ -340,6 +340,7 @@ def create_app():
                     timeline_force = gr.Checkbox(label="force regenerate", value=False)
                     timeline_dry_run = gr.Checkbox(label="dry run", value=True)
                     timeline_ungrouped = gr.Checkbox(label="show ungrouped items", value=False)
+                    timeline_show_low_priority = gr.Checkbox(label="show low priority items", value=False)
                     timeline_btn = gr.Button("Refresh Timeline", variant="primary")
                     timeline_generate_btn = gr.Button("Generate / Refresh Month")
                 timeline_state = gr.State(initial_timeline_month_snapshots)
@@ -357,19 +358,22 @@ def create_app():
                         timeline_detail = gr.HTML(
                             renderers.render_month_timeline_detail(
                                 initial_timeline_month_snapshots[0] if initial_timeline_month_snapshots else None
-                            )
+                            ),
+                            js_on_load=NOTE_CARD_CLICK_JS,
                         )
+                        timeline_source_detail = gr.HTML(renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。"))
                 timeline_btn.click(
                     _refresh_timeline_tab,
-                    inputs=[timeline_year, timeline_month, timeline_category, timeline_theme, timeline_item_type, timeline_sort, timeline_limit, timeline_ungrouped],
-                    outputs=[timeline_output, timeline_detail, timeline_state, timeline_status],
+                    inputs=[timeline_year, timeline_month, timeline_category, timeline_theme, timeline_item_type, timeline_sort, timeline_limit, timeline_ungrouped, timeline_show_low_priority],
+                    outputs=[timeline_output, timeline_detail, timeline_source_detail, timeline_state, timeline_status],
                 )
                 timeline_generate_btn.click(
                     _generate_timeline_month_tab,
-                    inputs=[timeline_month, timeline_force, timeline_dry_run, timeline_ungrouped],
-                    outputs=[timeline_output, timeline_detail, timeline_state, timeline_status],
+                    inputs=[timeline_month, timeline_force, timeline_dry_run, timeline_ungrouped, timeline_show_low_priority],
+                    outputs=[timeline_output, timeline_detail, timeline_source_detail, timeline_state, timeline_status],
                 )
-                timeline_output.click(_select_timeline_month_card, inputs=[timeline_state, timeline_ungrouped], outputs=[timeline_output, timeline_detail], show_progress="hidden")
+                timeline_output.click(_select_timeline_month_card, inputs=[timeline_state, timeline_ungrouped, timeline_show_low_priority], outputs=[timeline_output, timeline_detail, timeline_source_detail], show_progress="hidden")
+                timeline_detail.click(_select_timeline_source_note, outputs=[timeline_source_detail], show_progress="hidden")
 
             with gr.Tab("Reflections"):
                 gr.Markdown("## Reflections\nMonthly reflections built from thoughts first, events second, summaries third.")
@@ -622,7 +626,7 @@ def _select_qa_card(warnings: list[dict] | None, evt: EventData = None):
     )
 
 
-def _refresh_timeline_tab(year, month, category, theme, item_type, sort, limit, ungrouped=False):
+def _refresh_timeline_tab(year, month, category, theme, item_type, sort, limit, ungrouped=False, show_low_priority=False):
     snapshots = services.get_timeline_month_snapshots(
         year=year or None,
         category=category or None,
@@ -636,30 +640,52 @@ def _refresh_timeline_tab(year, month, category, theme, item_type, sort, limit, 
     status = f"{len(snapshots)} monthly timeline cards"
     return (
         renderers.render_timeline_month_cards(snapshots, selected_month=selected_month),
-        renderers.render_month_timeline_detail(selected, grouped=not bool(ungrouped)),
+        renderers.render_month_timeline_detail(
+            selected,
+            grouped=not bool(ungrouped),
+            show_low_priority=bool(show_low_priority),
+        ),
+        renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。"),
         snapshots,
         status,
     )
 
 
-def _generate_timeline_month_tab(month: str | None, force: bool, dry_run: bool, ungrouped=False):
+def _generate_timeline_month_tab(month: str | None, force: bool, dry_run: bool, ungrouped=False, show_low_priority=False):
     status, snapshot = services.generate_timeline_snapshot_ui(month=month or None, force=bool(force), dry_run=bool(dry_run))
     snapshots = [snapshot] if snapshot else []
     return (
         renderers.render_timeline_month_cards(snapshots, selected_month=snapshot.month if snapshot else None),
-        renderers.render_month_timeline_detail(snapshot, grouped=not bool(ungrouped)),
+        renderers.render_month_timeline_detail(
+            snapshot,
+            grouped=not bool(ungrouped),
+            show_low_priority=bool(show_low_priority),
+        ),
+        renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。"),
         snapshots,
         status,
     )
 
 
-def _select_timeline_month_card(snapshots: list | None, ungrouped=False, evt: EventData = None):
+def _select_timeline_month_card(snapshots: list | None, ungrouped=False, show_low_priority=False, evt: EventData = None):
     month = _event_month_choice(evt)
     selected = _snapshot_by_month(snapshots or [], month)
     return (
         renderers.render_timeline_month_cards(snapshots or [], selected_month=month),
-        renderers.render_month_timeline_detail(selected, grouped=not bool(ungrouped)),
+        renderers.render_month_timeline_detail(
+            selected,
+            grouped=not bool(ungrouped),
+            show_low_priority=bool(show_low_priority),
+        ),
+        renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。"),
     )
+
+
+def _select_timeline_source_note(evt: EventData = None):
+    choice = _event_note_choice(evt)
+    if not choice:
+        return renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。")
+    return renderers.render_note_detail(services.get_note_detail(choice))
 
 
 def _refresh_reflection_tab(month: str | None, force: bool):

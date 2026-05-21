@@ -166,6 +166,9 @@ class TimelineBuildLimits:
 DEFAULT_TIMELINE_LIMITS = TimelineBuildLimits()
 UNKNOWN_MONTHS = {"1900-01", "0000-00", "unknown"}
 LOW_PRIORITY_TAG = "low_priority"
+MAIN_VISIBLE_FLAGS = {"low_confidence", "weak_evidence", "date_uncertain"}
+INFO_WARNINGS = {"date_modified_only"}
+SEVERE_WARNINGS = {"evidence_missing", "unknown_date", "date_attribution_uncertain", "invalid_month_1900", "suggestions_dominated"}
 
 
 def build_timeline(month: str | None = None, *, db_path: str | Path | None = None, limit: int = 100) -> list[TimelineItem]:
@@ -739,16 +742,33 @@ def format_month_timeline_markdown(
         "### 根拠",
     ]
     lines.extend([f"- `{item['note_id'][:12]}` {item['quote']}" for item in snapshot.evidence] or ["- evidence is missing"])
-    warnings = snapshot.quality.get("warnings") or []
-    if warnings:
-        lines.extend(["", "### Quality Warnings", *[f"- {warning}" for warning in warnings]])
-    def append_item_section(title: str, values: list[TimelineDisplayItem], max_count: int) -> None:
+    severe_warnings = snapshot.quality.get("severe_warnings") or []
+    review_warnings = snapshot.quality.get("review_warnings") or snapshot.quality.get("warnings") or []
+    info_warnings = snapshot.quality.get("info_warnings") or []
+    if severe_warnings or review_warnings or info_warnings:
+        lines.append("")
+        lines.append("### Quality Warnings")
+        if severe_warnings:
+            lines.extend(["#### Severe", *[f"- {warning}" for warning in severe_warnings]])
+        if review_warnings:
+            lines.extend(["#### Review", *[f"- {warning}" for warning in review_warnings]])
+        if info_warnings:
+            lines.extend(["#### Info", *[f"- {warning}" for warning in info_warnings]])
+
+    def append_item_section(
+        title: str,
+        values: list[TimelineDisplayItem],
+        max_count: int,
+        *,
+        flag_context: str,
+    ) -> None:
         lines.extend(["", f"### {title}"])
         if not values:
             lines.append("- なし")
             return
         for item in sorted(values, key=lambda row: row.sort_key)[:max_count]:
-            flags = f" / flags: {', '.join(item.quality_flags)}" if item.quality_flags else ""
+            visible_flags = _visible_display_flags(item, context=flag_context)
+            flags = f" / flags: {', '.join(visible_flags)}" if visible_flags else ""
             sub_items = f" / sub_items: {len(item.sub_items)}" if item.sub_items else ""
             lines.append(
                 f"- {item.date_label or '日付不明'} [{item.item_type}] "
@@ -762,14 +782,23 @@ def format_month_timeline_markdown(
     main_items = groups["main"]
     suggestion_items = groups["suggestions"]
     low_priority_items = groups["low_priority"]
-    append_item_section("Main Timeline Items", main_items, 20)
-    append_item_section("Supporting Suggestions", suggestion_items, 10)
+    append_item_section("Main Timeline Items", main_items, 20, flag_context="main_grouped" if grouped else "main_ungrouped")
+    append_item_section("Supporting Suggestions", suggestion_items, 10, flag_context="suggestion")
     if hide_low_priority:
-        lines.extend(["", "### Low Priority / Needs Review", f"- hidden ({len(low_priority_items)} items)"])
+        reasons = _common_low_priority_reasons(low_priority_items)
+        reason_text = ", ".join(reasons) if reasons else "none"
+        lines.extend(
+            [
+                "",
+                "### Low Priority / Needs Review",
+                f"- {len(low_priority_items)}件あります。主な理由: {reason_text}",
+                "- 表示するには --show-low-priority を付けてください。",
+            ]
+        )
     elif show_low_priority:
-        append_item_section("Low Priority / Needs Review", low_priority_items, max(len(low_priority_items), 1))
+        append_item_section("Low Priority / Needs Review", low_priority_items, max(len(low_priority_items), 1), flag_context="low_priority")
     else:
-        append_item_section("Low Priority / Needs Review", low_priority_items, max(0, int(low_priority_limit)))
+        append_item_section("Low Priority / Needs Review", low_priority_items, max(0, int(low_priority_limit)), flag_context="low_priority")
     return "\n".join(lines)
 
 
@@ -825,12 +854,14 @@ def timeline_qa(
                     "month": value,
                     "quality_score": 0.0,
                     "warnings": ["monthly_timeline_snapshot is missing"],
+                    "info_warnings": [],
                     "source_counts": {},
                     "recommended_action": "generate-timelineを実行してください。",
                 }
             )
             continue
         warnings = list(snapshot.quality.get("warnings") or [])
+        info_warnings = list(snapshot.quality.get("info_warnings") or [])
         if not snapshot.thought_summary.strip():
             warnings.append("thought_summary is empty")
         if not snapshot.event_summary.strip():
@@ -844,6 +875,7 @@ def timeline_qa(
             "month": snapshot.month,
             "quality_score": score,
             "warnings": warnings,
+            "info_warnings": info_warnings,
             "source_counts": snapshot.source_counts,
             "recommended_action": _timeline_qa_action(warnings, snapshot=snapshot),
         }
@@ -854,12 +886,14 @@ def timeline_qa(
                 {
                     "type": item.item_type,
                     "title": _short(item.title, 60),
+                    "source_note_id": item.source_note_id,
                     "quality": "low_priority" if item in display_groups["low_priority"] else "main",
                     "quality_flags": item.quality_flags,
                     "sub_items": len(item.sub_items),
                 }
                 for item in display_items[:20]
             ]
+            qa_row["warning_items"] = _timeline_warning_items(snapshot, display_groups)
         rows.append(qa_row)
     return rows
 
@@ -1076,7 +1110,8 @@ def _build_month_timeline_items_from_sources(
     }
     now = datetime.now(tz=timezone.utc).isoformat()
     for row in sources.get("events") or []:
-        evidence = _evidence(row.get("evidence_json"), row.get("note_id", ""))
+        source_note_id = _source_note_ref(row.get("note_id"), row.get("evidence_json"))
+        evidence = _evidence(row.get("evidence_json"), source_note_id)
         date_value = _first_date_value(row.get("event_date"), row.get("date_label"), row.get("note_date_value"))
         date_source = row.get("_timeline_date_source") or ("explicit_event_date" if _normalize_month_key(_first_date_value(row.get("event_date"), row.get("date_label"))) else "unknown")
         date_quality = row.get("_timeline_date_quality") or _date_quality_for_source(date_source)
@@ -1085,7 +1120,7 @@ def _build_month_timeline_items_from_sources(
         summary = row.get("summary") or ""
         evidence, evidence_enriched = _enrich_evidence_from_body(
             evidence,
-            note_id=row.get("note_id") or "",
+            note_id=source_note_id,
             title=title,
             summary=summary,
             body=row.get("source_body") or "",
@@ -1111,7 +1146,7 @@ def _build_month_timeline_items_from_sources(
                 evidence=evidence,
                 source_table="events",
                 source_id=str(row.get("id") or ""),
-                source_note_id=row.get("note_id") or "",
+                source_note_id=source_note_id,
                 confidence=_score_confidence(row.get("confidence"), evidence=evidence, date_value=date_value),
                 importance=_score_importance(row.get("importance"), evidence=evidence, categories=categories, date_value=date_value),
                 date_confidence=_date_confidence_score(row.get("date_confidence") or date_quality or date_source),
@@ -1124,7 +1159,8 @@ def _build_month_timeline_items_from_sources(
             )
         )
     for row in sources.get("thoughts") or []:
-        evidence = _evidence(row.get("evidence_json"), row.get("note_id", ""))
+        source_note_id = _source_note_ref(row.get("note_id"), row.get("evidence_json"))
+        evidence = _evidence(row.get("evidence_json"), source_note_id)
         date_value = _first_date_value(row.get("date_label"), row.get("note_date_value"))
         themes = _json_list(row.get("themes_json"))
         categories = category_by_note.get(row.get("note_id"), [])
@@ -1134,7 +1170,7 @@ def _build_month_timeline_items_from_sources(
         date_quality = row.get("_timeline_date_quality") or _date_quality_for_source(date_source)
         evidence, evidence_enriched = _enrich_evidence_from_body(
             evidence,
-            note_id=row.get("note_id") or "",
+            note_id=source_note_id,
             title=title,
             summary=summary,
             body=row.get("source_body") or "",
@@ -1160,7 +1196,7 @@ def _build_month_timeline_items_from_sources(
                 evidence=evidence,
                 source_table="thoughts",
                 source_id=str(row.get("id") or ""),
-                source_note_id=row.get("note_id") or "",
+                source_note_id=source_note_id,
                 confidence=_score_confidence(row.get("confidence"), evidence=evidence, date_value=date_value),
                 importance=_score_importance(row.get("importance"), evidence=evidence, categories=categories, has_reminder=bool(row.get("remember_reason")), date_value=date_value),
                 date_confidence=_date_confidence_score(date_quality or date_source),
@@ -1173,7 +1209,8 @@ def _build_month_timeline_items_from_sources(
             )
         )
     for row in sources.get("summaries") or []:
-        evidence = _evidence(row.get("summary_evidence_json"), row.get("id", ""))
+        source_note_id = _source_note_ref(row.get("id"), row.get("summary_evidence_json"))
+        evidence = _evidence(row.get("summary_evidence_json"), source_note_id)
         date_value = _first_date_value(row.get("_timeline_date_value"), row.get("created_at"), row.get("modified_at"), row.get("note_date"), row.get("imported_at"))
         categories = category_by_note.get(row.get("id"), [])
         points = " / ".join(str(item) for item in _json_list(row.get("important_points_json"))[:3])
@@ -1187,7 +1224,7 @@ def _build_month_timeline_items_from_sources(
         date_quality = row.get("_timeline_date_quality") or _date_quality_for_source(date_source)
         evidence, evidence_enriched = _enrich_evidence_from_body(
             evidence,
-            note_id=row.get("id") or "",
+            note_id=source_note_id,
             title=title,
             summary=summary,
             body=row.get("body") or "",
@@ -1213,7 +1250,7 @@ def _build_month_timeline_items_from_sources(
                 evidence=evidence,
                 source_table="note_summaries",
                 source_id=row.get("id") or "",
-                source_note_id=row.get("id") or "",
+                source_note_id=source_note_id,
                 confidence=_score_confidence(row.get("summary_confidence"), evidence=evidence, date_value=date_value),
                 importance=_score_importance(base_importance, evidence=evidence, categories=categories, has_reminder=bool(revisit), date_value=date_value),
                 date_confidence=_date_confidence_score(date_quality or date_source),
@@ -1226,10 +1263,11 @@ def _build_month_timeline_items_from_sources(
             )
         )
     for row in sources.get("suggestions") or []:
-        note_id = row.get("note_id") or ""
+        raw_note_id = row.get("note_id") or ""
+        note_id = _source_note_ref(raw_note_id, row.get("evidence_json"))
         evidence = _evidence(row.get("evidence_json"), note_id)
         date_value = row.get("_timeline_date_value") or row.get("target_date") or ""
-        categories = category_by_note.get(note_id, [])
+        categories = category_by_note.get(raw_note_id, [])
         title = row.get("title") or "Suggestion"
         summary = row.get("message") or ""
         date_source = row.get("_timeline_date_source") or ("target_date" if _normalize_month_key(row.get("target_date")) else "unknown")
@@ -1400,21 +1438,30 @@ def _attribute_suggestion_to_month(row: dict[str, Any], note_dates: dict[str, st
         row["_timeline_date_confidence"] = "medium"
         row["_timeline_date_source"] = "evidence_note_created_at"
         row["_timeline_date_quality"] = "medium"
-        if target_looks_generated:
-            row["_timeline_attribution_warning"] = "generated_date_used_for_suggestion"
         return row
     return None
 
 
 def _suggestion_evidence_date(row: dict[str, Any], note_dates: dict[str, str]) -> str:
     note_id = str(row.get("note_id") or "")
-    if note_id and note_dates.get(note_id):
-        return note_dates[note_id]
+    note_date = _lookup_note_date(note_id, note_dates)
+    if note_date:
+        return note_date
     for item in _evidence(row.get("evidence_json"), note_id):
         evidence_note_id = str(item.get("note_id") or "")
-        if evidence_note_id and note_dates.get(evidence_note_id):
-            return note_dates[evidence_note_id]
+        note_date = _lookup_note_date(evidence_note_id, note_dates)
+        if note_date:
+            return note_date
     return str(row.get("note_date_value") or "")
+
+
+def _lookup_note_date(note_id: str, note_dates: dict[str, str]) -> str:
+    if not note_id:
+        return ""
+    if note_dates.get(note_id):
+        return note_dates[note_id]
+    matches = [value for key, value in note_dates.items() if key.startswith(note_id)]
+    return matches[0] if len(matches) == 1 else ""
 
 
 def _first_date_value(*values: Any) -> str:
@@ -1626,7 +1673,7 @@ def _quality_flags_for_item(item: MonthTimelineItem) -> list[str]:
         "very_short_summary": ["weak_evidence"],
         "link_only": ["weak_evidence"],
         "only_other_category": ["low_importance"],
-        "generated_date_used_for_suggestion": ["date_uncertain"],
+        "generated_date_used_for_suggestion": ["generated_date_used_for_suggestion", "date_uncertain"],
     }
     for raw in raw_flags:
         flags.extend(mapping.get(raw, [raw]))
@@ -1782,6 +1829,7 @@ def _sub_item_dict(item: MonthTimelineItem) -> dict[str, Any]:
         "item_type": item.item_type,
         "title": item.title,
         "summary": _item_narrative(item, 140),
+        "source_note_id": item.source_note_id,
         "quality_flags": _display_quality_flags(item),
         "confidence": item.confidence,
         "importance": item.importance,
@@ -1827,6 +1875,33 @@ def _has_severe_quality_flag(item: MonthTimelineItem) -> bool:
 
 def _display_quality_flags(item: MonthTimelineItem) -> list[str]:
     return item.quality_flags or _quality_flags_for_item(item)
+
+
+def visible_timeline_flags(
+    item: TimelineDisplayItem,
+    *,
+    low_priority: bool = False,
+    grouped: bool = True,
+) -> list[str]:
+    if low_priority:
+        return _visible_display_flags(item, context="low_priority")
+    return _visible_display_flags(item, context="main_grouped" if grouped else "main_ungrouped")
+
+
+def _visible_display_flags(item: TimelineDisplayItem, *, context: str) -> list[str]:
+    flags = list(item.quality_flags or [])
+    if context == "low_priority":
+        return flags
+    if context == "main_ungrouped":
+        return [flag for flag in flags if flag in MAIN_VISIBLE_FLAGS or flag == "duplicate_same_note"]
+    return [flag for flag in flags if flag in MAIN_VISIBLE_FLAGS]
+
+
+def _common_low_priority_reasons(items: list[TimelineDisplayItem], *, limit: int = 6) -> list[str]:
+    counter: Counter[str] = Counter()
+    for item in items:
+        counter.update(item.quality_flags or [])
+    return [flag for flag, _ in counter.most_common(limit)]
 
 
 def _clean_display_categories(values: list[str]) -> list[str]:
@@ -2162,6 +2237,7 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
     counts = _source_counts_from_sources(sources)
     evidence_items = [item for item in items if any((row.get("quote") or "").strip() for row in item.evidence)]
     warnings = []
+    info_warnings = []
     if not evidence_items:
         warnings.append("evidence_missing")
     if any(
@@ -2177,7 +2253,7 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
     if items and unknown_dates / len(items) > 0.25:
         warnings.extend(["unknown_date", "date_attribution_uncertain"])
     if items and modified_only_dates / len(items) > 0.5:
-        warnings.append("date_modified_only")
+        info_warnings.append("date_modified_only")
     direct_items = _direct_items(items)
     main_items = _main_material_items(items)
     suggestion_items = [item for item in items if item.item_type == "suggestion"]
@@ -2212,6 +2288,8 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
         quality_score += 0.08
     quality_score += min(0.2, len(evidence_items) / source_count * 0.2)
     quality_score = max(0.0, min(1.0, quality_score))
+    review_warnings = sorted(set(warnings) - SEVERE_WARNINGS)
+    severe_warnings = sorted(set(warnings) & SEVERE_WARNINGS)
     return {
         "source_counts": counts,
         "item_counts": dict(Counter(item.item_type for item in items)),
@@ -2224,6 +2302,9 @@ def _timeline_quality(sources: dict[str, Any], items: list[MonthTimelineItem]) -
         "is_fallback_heavy": fallback_heavy,
         "is_suggestions_dominated": suggestions_dominated,
         "warnings": sorted(set(warnings)),
+        "review_warnings": review_warnings,
+        "severe_warnings": severe_warnings,
+        "info_warnings": sorted(set(info_warnings)),
         "quality_score": quality_score,
     }
 
@@ -2239,6 +2320,21 @@ def _timeline_importance(items: list[MonthTimelineItem]) -> float:
     material = _main_material_items(items) or [item for item in items if not _is_low_priority_item(item)] or items
     top = sorted((item.importance for item in material), reverse=True)[:5]
     return max(0.0, min(1.0, sum(top) / len(top)))
+
+
+def _timeline_storage_group_metadata(items: list[MonthTimelineItem]) -> dict[str, tuple[list[str], list[dict[str, Any]]]]:
+    by_source: dict[str, list[MonthTimelineItem]] = {}
+    for item in items:
+        key = item.source_note_id or item.id
+        by_source.setdefault(key, []).append(item)
+    metadata: dict[str, tuple[list[str], list[dict[str, Any]]]] = {}
+    for values in by_source.values():
+        ordered = sorted(values, key=lambda item: (_group_primary_rank(item), -item.importance, item.sort_key))
+        grouped_ids = [item.id for item in ordered]
+        sub_items = [_sub_item_dict(item) for item in ordered]
+        for item in values:
+            metadata[item.id] = (grouped_ids, sub_items if len(ordered) > 1 else [])
+    return metadata
 
 
 def _store_month_timeline_snapshot(snapshot: MonthTimelineSnapshot, *, db_path: str | Path | None, force: bool) -> None:
@@ -2301,7 +2397,9 @@ def _store_month_timeline_snapshot(snapshot: MonthTimelineSnapshot, *, db_path: 
             ),
         )
         conn.execute("DELETE FROM monthly_timeline_items WHERE month = ?", (snapshot.month,))
+        grouping_metadata = _timeline_storage_group_metadata(snapshot.items)
         for item in snapshot.items:
+            grouped_item_ids, sub_items = grouping_metadata.get(item.id, ([item.id], []))
             conn.execute(
                 """
                 INSERT INTO monthly_timeline_items(
@@ -2309,9 +2407,10 @@ def _store_month_timeline_snapshot(snapshot: MonthTimelineSnapshot, *, db_path: 
                     title, summary, detail, themes_json, categories_json,
                     emotion_json, evidence_json, source_table, source_id,
                     source_note_id, confidence, importance, date_confidence,
-                    date_source, date_quality, evidence_enriched, quality_flags_json, sort_key, created_at
+                    date_source, date_quality, evidence_enriched, quality_flags_json,
+                    grouped_item_ids_json, sub_items_json, sort_key, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.id,
@@ -2337,6 +2436,8 @@ def _store_month_timeline_snapshot(snapshot: MonthTimelineSnapshot, *, db_path: 
                     item.date_quality,
                     1 if item.evidence_enriched else 0,
                     json.dumps(item.quality_flags, ensure_ascii=False),
+                    json.dumps(grouped_item_ids, ensure_ascii=False),
+                    json.dumps(sub_items, ensure_ascii=False),
                     item.sort_key,
                     item.created_at,
                 ),
@@ -2379,6 +2480,7 @@ def _snapshot_from_row(row, items: list[MonthTimelineItem]) -> MonthTimelineSnap
 
 
 def _month_item_from_row(row) -> MonthTimelineItem:
+    source_note_id = _timeline_note_ref(row["source_note_id"] or "")
     return MonthTimelineItem(
         id=row["id"],
         month=row["month"],
@@ -2392,10 +2494,10 @@ def _month_item_from_row(row) -> MonthTimelineItem:
         themes=_json_list(row["themes_json"]),
         categories=_json_list(row["categories_json"]),
         emotion=_json_obj(row["emotion_json"]),
-        evidence=_evidence(row["evidence_json"], row["source_note_id"] or ""),
+        evidence=_evidence(row["evidence_json"], source_note_id),
         source_table=row["source_table"] or "",
         source_id=row["source_id"] or "",
-        source_note_id=row["source_note_id"] or "",
+        source_note_id=source_note_id,
         confidence=float(row["confidence"] or 0.0),
         importance=float(row["importance"] or 0.0),
         date_confidence=float(row["date_confidence"] or 0.0),
@@ -2430,6 +2532,49 @@ def _timeline_qa_action(warnings: list[str], *, snapshot: MonthTimelineSnapshot 
     if "date_attribution_uncertain" in warnings or "unknown_date" in warnings or "date_modified_only" in warnings:
         return "日付帰属が弱い項目があります。source noteの日付やdate_labelを確認してください。"
     return "Timeline detailで元メモを確認してください。"
+
+
+def _timeline_warning_items(
+    snapshot: MonthTimelineSnapshot,
+    display_groups: dict[str, list[TimelineDisplayItem]],
+) -> dict[str, list[dict[str, Any]]]:
+    display_items = display_groups["main"] + display_groups["suggestions"] + display_groups["low_priority"]
+    mapping: dict[str, list[dict[str, Any]]] = {}
+
+    def add(warning: str, item: TimelineDisplayItem, reason: str) -> None:
+        mapping.setdefault(warning, []).append(
+            {
+                "title": _short(item.title, 80),
+                "item_type": item.item_type,
+                "source_note_id": item.source_note_id,
+                "quality_flags": item.quality_flags,
+                "reason": reason,
+            }
+        )
+
+    for item in display_items:
+        flags = set(item.quality_flags or [])
+        if flags & {"noisy_pdf", "scanned_document", "mojibake", "lyric_or_song", "shopping_list"}:
+            add("noisy_items_present", item, "low-priority noise flags")
+        if item in display_groups["low_priority"]:
+            add("low_value_items_present", item, "classified as low priority")
+        if "low_confidence" in flags or item.confidence <= 0.45:
+            add("low_confidence", item, "confidence <= 0.45 or low_confidence flag")
+        if "title_only_evidence" in flags:
+            add("title_only_evidence", item, "evidence quote is title-like")
+        if "weak_evidence" in flags:
+            add("evidence_missing", item, "weak or missing evidence")
+        if "date_uncertain" in flags:
+            add("date_attribution_uncertain", item, "date source is unknown or low quality")
+        if "generated_date_used_for_suggestion" in flags:
+            add("generated_date_used_for_suggestion", item, "suggestion still carries generated-date warning")
+
+    for item in snapshot.items:
+        if item.date_source == "note_modified_at":
+            pseudo = _display_item_from_raw(item)
+            add("date_modified_only", pseudo, "uses note.modified_at as timeline date")
+
+    return {warning: values[:12] for warning, values in mapping.items()}
 
 
 def _json_list(payload: str | None) -> list[Any]:
@@ -2633,13 +2778,32 @@ def _evidence(payload: str | None, note_id: str) -> list[dict[str, str]]:
         value = json.loads(payload or "[]")
     except json.JSONDecodeError:
         value = []
+    fallback_note_id = _timeline_note_ref(note_id)
     if isinstance(value, list) and value:
         return [
-            {"note_id": str(item.get("note_id") or note_id), "quote": str(item.get("quote") or "")[:120]}
+            {"note_id": _timeline_note_ref(item.get("note_id") or fallback_note_id), "quote": str(item.get("quote") or "")[:120]}
             for item in value
             if isinstance(item, dict)
         ]
-    return [{"note_id": note_id, "quote": ""}]
+    return [{"note_id": fallback_note_id, "quote": ""}]
+
+
+def _source_note_ref(note_id: Any, evidence_payload: str | None = None) -> str:
+    direct = _timeline_note_ref(note_id)
+    if direct:
+        return direct
+    for row in _evidence(evidence_payload, ""):
+        recovered = _timeline_note_ref(row.get("note_id"))
+        if recovered:
+            return recovered
+    return ""
+
+
+def _timeline_note_ref(note_id: Any) -> str:
+    value = str(note_id or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{32,}", value):
+        return value[:12]
+    return value
 
 
 def _average(values: list[float], *, default: float) -> float:
