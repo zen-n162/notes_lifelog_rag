@@ -10,7 +10,8 @@ from typing import Any, Callable
 
 from notes_lifelog_rag.config import database_path, load_categories
 from notes_lifelog_rag.db.schema import connect, init_db
-from notes_lifelog_rag.llm.backends import LLMBackend, get_llm_backend
+from notes_lifelog_rag.llm.backends import LLMBackend, build_prompt, get_llm_backend
+from notes_lifelog_rag.llm.json_utils import LenientJSONError
 from notes_lifelog_rag.runtime.device import DeviceInfo
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -41,6 +42,21 @@ class AnalysisSummary:
     dry_run: bool = False
     would_process_note_ids: list[str] | None = None
     disabled_reason: str | None = None
+
+
+@dataclass
+class AnalysisSampleResult:
+    task_name: str
+    note_id: str
+    title: str
+    model_name: str
+    prompt: str
+    raw_output: str
+    parsed_json: dict[str, Any] | None
+    success: bool
+    error_type: str | None = None
+    error_message: str | None = None
+    saved: bool = False
 
 
 def summarize_notes(
@@ -266,6 +282,91 @@ def analyze_all(
     ]
 
 
+def analyze_sample(
+    *,
+    task_name: str,
+    db_path: str | Path | None = None,
+    note_id: str | None = None,
+    limit: int = 1,
+    backend_name: str = "auto",
+    device_info: DeviceInfo | None = None,
+    dtype: str = "auto",
+    max_new_tokens: int = 1024,
+    save: bool = False,
+) -> list[AnalysisSampleResult]:
+    if task_name not in {"summary", "categories", "events", "thoughts"}:
+        raise ValueError(f"Unsupported analysis task: {task_name}")
+    init_db(db_path)
+    backend = get_llm_backend(
+        backend_name,
+        allow_mock_fallback=True,
+        device_info=device_info,
+        dtype=dtype,
+        max_new_tokens=max_new_tokens,
+    )
+    categories = load_categories()
+    results: list[AnalysisSampleResult] = []
+    with connect(db_path) as conn:
+        notes = _select_sample_notes(conn, note_id=note_id, limit=limit)
+        for note in notes:
+            prompt = build_prompt(task_name, dict(note), categories)
+            raw_output = ""
+            payload: dict[str, Any] | None = None
+            error_type: str | None = None
+            error_message: str | None = None
+            saved = False
+            if not backend.is_available():
+                error_type = "model_load_error"
+                error_message = backend.availability_error() or "LLM backend is unavailable."
+            else:
+                try:
+                    payload, raw_output = _generate_payload(backend, task_name, dict(note), categories=categories)
+                    if save:
+                        input_hash = _input_hash(task_name, note)
+                        conn.execute("SAVEPOINT analyze_sample_note")
+                        try:
+                            _store_for_task(task_name)(conn, note, payload, backend.model_name)
+                            _record_model_run(
+                                conn,
+                                task_name,
+                                backend.model_name,
+                                input_hash,
+                                payload,
+                                True,
+                                note=note,
+                                raw_output=raw_output,
+                                error_type=None,
+                                error_message=None,
+                                fallback_used=_backend_fallback_used(backend),
+                            )
+                            conn.execute("RELEASE SAVEPOINT analyze_sample_note")
+                            conn.commit()
+                            saved = True
+                        except Exception as exc:
+                            conn.execute("ROLLBACK TO SAVEPOINT analyze_sample_note")
+                            conn.execute("RELEASE SAVEPOINT analyze_sample_note")
+                            error_type = "db_insert_error"
+                            error_message = str(exc)
+                except Exception as exc:
+                    error_type, error_message, raw_output = _analysis_error_details(exc, raw_output)
+            results.append(
+                AnalysisSampleResult(
+                    task_name=task_name,
+                    note_id=str(note["id"]),
+                    title=str(note["title"]),
+                    model_name=backend.model_name,
+                    prompt=prompt,
+                    raw_output=raw_output,
+                    parsed_json=payload,
+                    success=payload is not None and error_type is None,
+                    error_type=error_type,
+                    error_message=error_message,
+                    saved=saved,
+                )
+            )
+    return results
+
+
 def _run_note_task(
     task_name: str,
     backend: LLMBackend,
@@ -331,19 +432,73 @@ def _run_note_task(
                 continue
             if cached is not None:
                 payload = cached
+                raw_output = json.dumps(payload, ensure_ascii=False)
+                generated = False
                 summary.cached_notes += 1
             else:
                 try:
-                    payload = backend.generate_json(task_name, dict(note), categories=categories)
-                    _record_model_run(conn, task_name, backend.model_name, input_hash, payload, True, None)
+                    payload, raw_output = _generate_payload(backend, task_name, dict(note), categories=categories)
+                    generated = True
                 except Exception as exc:  # local model JSON/runtime failures should not stop the whole batch.
                     summary.failed_notes += 1
-                    _record_model_run(conn, task_name, backend.model_name, input_hash, {}, False, str(exc))
+                    error_type, error_message, raw_output = _analysis_error_details(exc)
+                    _record_model_run(
+                        conn,
+                        task_name,
+                        backend.model_name,
+                        input_hash,
+                        {},
+                        False,
+                        note=note,
+                        raw_output=raw_output,
+                        error_type=error_type,
+                        error_message=error_message,
+                        fallback_used=_backend_fallback_used(backend),
+                    )
                     conn.commit()
                     if progress_callback:
                         progress_callback(index, len(notes_to_process), task_name)
                     continue
-            created = store(conn, note, payload, backend.model_name)
+            conn.execute("SAVEPOINT analysis_note")
+            try:
+                created = store(conn, note, payload, backend.model_name)
+                if generated:
+                    _record_model_run(
+                        conn,
+                        task_name,
+                        backend.model_name,
+                        input_hash,
+                        payload,
+                        True,
+                        note=note,
+                        raw_output=raw_output,
+                        error_type=None,
+                        error_message=None,
+                        fallback_used=_backend_fallback_used(backend),
+                    )
+                conn.execute("RELEASE SAVEPOINT analysis_note")
+            except Exception as exc:
+                conn.execute("ROLLBACK TO SAVEPOINT analysis_note")
+                conn.execute("RELEASE SAVEPOINT analysis_note")
+                summary.failed_notes += 1
+                if generated:
+                    _record_model_run(
+                        conn,
+                        task_name,
+                        backend.model_name,
+                        input_hash,
+                        payload,
+                        False,
+                        note=note,
+                        raw_output=raw_output,
+                        error_type="db_insert_error",
+                        error_message=str(exc),
+                        fallback_used=_backend_fallback_used(backend),
+                    )
+                conn.commit()
+                if progress_callback:
+                    progress_callback(index, len(notes_to_process), task_name)
+                continue
             summary.created_items += created
             summary.processed_notes += 1
             conn.commit()
@@ -578,6 +733,70 @@ def _store_thoughts(conn: sqlite3.Connection, note: sqlite3.Row, payload: dict[s
     return count
 
 
+def _select_sample_notes(conn: sqlite3.Connection, *, note_id: str | None, limit: int) -> list[sqlite3.Row]:
+    if note_id:
+        row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return [row] if row else []
+    return conn.execute(
+        """
+        SELECT *
+        FROM notes
+        ORDER BY COALESCE(note_date, modified_at, imported_at) DESC, title ASC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+
+def _store_for_task(task_name: str) -> StoreFunc:
+    mapping: dict[str, StoreFunc] = {
+        "summary": _store_summary,
+        "categories": _store_categories,
+        "events": _store_events,
+        "thoughts": _store_thoughts,
+    }
+    return mapping[task_name]
+
+
+def _generate_payload(
+    backend: LLMBackend,
+    task_name: str,
+    note: dict[str, Any],
+    *,
+    categories: list[str],
+) -> tuple[dict[str, Any], str]:
+    generate_with_raw = getattr(backend, "generate_with_raw", None)
+    if callable(generate_with_raw):
+        payload, raw_output = generate_with_raw(task_name, note, categories=categories)
+        return payload, str(raw_output or json.dumps(payload, ensure_ascii=False))
+    payload = backend.generate_json(task_name, note, categories=categories)
+    return payload, json.dumps(payload, ensure_ascii=False)
+
+
+def _analysis_error_details(exc: Exception, raw_output: str = "") -> tuple[str, str, str]:
+    if isinstance(exc, LenientJSONError):
+        return exc.error_type, str(exc), exc.raw_output or raw_output
+    message = str(exc)
+    lower = message.lower()
+    if "cuda" in lower and "out of memory" in lower:
+        return "cuda_oom", message, raw_output
+    if isinstance(exc, json.JSONDecodeError):
+        return "json_parse_error", message, raw_output
+    if isinstance(exc, KeyError):
+        return "schema_validation_error", message, raw_output
+    if "schema" in lower or "validation" in lower:
+        return "schema_validation_error", message, raw_output
+    if "prompt" in lower:
+        return "prompt_error", message, raw_output
+    if "model" in lower or "transformers" in lower or "torch" in lower:
+        return "model_load_error", message, raw_output
+    return "unknown_error", message, raw_output
+
+
+def _backend_fallback_used(backend: LLMBackend) -> bool:
+    return backend.__class__.__name__.lower().startswith("rule")
+
+
 def _cached_model_run(conn: sqlite3.Connection, task_name: str, model_name: str, input_hash: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
@@ -588,7 +807,10 @@ def _cached_model_run(conn: sqlite3.Connection, task_name: str, model_name: str,
         """,
         (task_name, model_name, input_hash),
     ).fetchone()
-    return json.loads(row["output_json"]) if row and row["output_json"] else None
+    try:
+        return json.loads(row["output_json"]) if row and row["output_json"] else None
+    except json.JSONDecodeError:
+        return None
 
 
 def _record_model_run(
@@ -598,33 +820,51 @@ def _record_model_run(
     input_hash: str,
     payload: dict[str, Any],
     success: bool,
+    *,
+    note: sqlite3.Row,
+    raw_output: str | None,
+    error_type: str | None,
     error_message: str | None,
+    fallback_used: bool = False,
 ) -> None:
     conn.execute(
         """
         INSERT INTO model_runs(
-            task_name, model_name, input_hash, output_json, success, error_message,
-            created_at, prompt_version, empty_result
+            task_name, model_name, note_id, input_hash, body_hash, output_json, raw_output,
+            success, error_type, error_message, created_at, prompt_version,
+            empty_result, retry_count, fallback_used
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_name, model_name, input_hash) DO UPDATE SET
+            note_id = excluded.note_id,
+            body_hash = excluded.body_hash,
             output_json = excluded.output_json,
+            raw_output = excluded.raw_output,
             success = excluded.success,
+            error_type = excluded.error_type,
             error_message = excluded.error_message,
             created_at = excluded.created_at,
             prompt_version = excluded.prompt_version,
-            empty_result = excluded.empty_result
+            empty_result = excluded.empty_result,
+            retry_count = COALESCE(model_runs.retry_count, 0) + CASE WHEN excluded.success = 0 THEN 1 ELSE 0 END,
+            fallback_used = excluded.fallback_used
         """,
         (
             task_name,
             model_name,
+            str(note["id"]),
             input_hash,
+            str(note["content_hash"]),
             json.dumps(payload, ensure_ascii=False),
+            raw_output,
             1 if success else 0,
+            error_type,
             error_message,
             _now(),
             PROMPT_VERSION,
             1 if success and not _payload_has_storable_output(task_name, payload) else 0,
+            0 if success else 1,
+            1 if fallback_used else 0,
         ),
     )
 

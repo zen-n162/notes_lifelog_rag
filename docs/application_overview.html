@@ -546,6 +546,14 @@
               </tr>
             </tbody>
           </table>
+          <p>
+            failure tracking も <code>model_runs</code> に統合しました。新しい失敗行には
+            <code>note_id</code>, <code>body_hash</code>, <code>prompt_version</code>,
+            <code>raw_output</code>, <code>error_type</code>, <code>error_message</code>,
+            <code>empty_result</code>, <code>retry_count</code>, <code>fallback_used</code> が入り、
+            古い失敗行も <code>legacy_unknown_failure</code> や <code>json_parse_error</code> などに可能な範囲で分類されます。
+            <code>analysis-failures</code> で失敗を一覧化し、<code>analyze-sample</code> で1件だけraw出力とJSON解析結果を確認できます。
+          </p>
         </section>
 
         <section id="commands">
@@ -559,13 +567,19 @@ python -m notes_lifelog_rag.cli build-embeddings --dry-run --limit 100
 python -m notes_lifelog_rag.cli analyze-all --only-missing --dry-run
 python -m notes_lifelog_rag.cli analyze-all --only-missing --limit 10
 python -m notes_lifelog_rag.cli analyze-all --backend local --only-missing --device auto --dtype auto --batch-size 2 --max-new-tokens 512 --show-device
+python -m notes_lifelog_rag.cli analysis-failures --group-by-error
+python -m notes_lifelog_rag.cli analysis-failures --task events --limit 20
+python -m notes_lifelog_rag.cli db-schema --table model_runs
+python -m notes_lifelog_rag.cli analyze-sample --task summary --backend local --device auto --max-new-tokens 1024 --show-raw-output
 python -m notes_lifelog_rag.cli search "研究"
 python -m notes_lifelog_rag.cli timeline-months
 python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule
+python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --force
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
 python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
+python -m notes_lifelog_rag.cli timeline-qa --all-months
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05
 python -m notes_lifelog_rag.cli reflections --month 2026-05
 python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>

@@ -196,12 +196,18 @@ CREATE TABLE IF NOT EXISTS model_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_name TEXT NOT NULL,
     model_name TEXT NOT NULL,
+    note_id TEXT,
     input_hash TEXT NOT NULL,
+    body_hash TEXT,
     output_json TEXT,
+    raw_output TEXT,
     success INTEGER NOT NULL,
+    error_type TEXT,
     error_message TEXT,
     prompt_version TEXT,
     empty_result INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 0,
+    fallback_used INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     UNIQUE(task_name, model_name, input_hash)
 );
@@ -223,6 +229,7 @@ def init_db(path: str | Path | None = None) -> Path:
     with connect(db_path) as conn:
         conn.executescript(CORE_TABLES_SQL)
         _ensure_columns(conn)
+        _backfill_model_run_failures(conn)
         _ensure_fts_table(conn)
         _ensure_indexes(conn)
         _seed_categories(conn, load_categories())
@@ -274,13 +281,22 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_snapshots_month ON monthly_timeline_snapshots(month)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_items_month_sort ON monthly_timeline_items(month, sort_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_items_source_note ON monthly_timeline_items(source_note_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_model_runs_task_success_error ON model_runs(task_name, success, error_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_model_runs_note_id ON model_runs(note_id)")
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "note_summaries", "importance", "REAL")
     _add_column_if_missing(conn, "note_categories", "importance", "REAL")
+    _add_column_if_missing(conn, "model_runs", "note_id", "TEXT")
+    _add_column_if_missing(conn, "model_runs", "body_hash", "TEXT")
+    _add_column_if_missing(conn, "model_runs", "raw_output", "TEXT")
+    _add_column_if_missing(conn, "model_runs", "error_type", "TEXT")
+    _add_column_if_missing(conn, "model_runs", "error_message", "TEXT")
     _add_column_if_missing(conn, "model_runs", "prompt_version", "TEXT")
     _add_column_if_missing(conn, "model_runs", "empty_result", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "model_runs", "retry_count", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "model_runs", "fallback_used", "INTEGER DEFAULT 0")
     _add_column_if_missing(conn, "suggestions", "suggestion_type", "TEXT NOT NULL DEFAULT 'revisit_note'")
     _add_column_if_missing(conn, "suggestions", "target_date", "TEXT")
     _add_column_if_missing(conn, "suggestions", "status", "TEXT NOT NULL DEFAULT 'new'")
@@ -290,6 +306,42 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _backfill_model_run_failures(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE model_runs
+        SET error_type = CASE
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%cuda%out of memory%' THEN 'cuda_oom'
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%json%' THEN 'json_parse_error'
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%expecting%' THEN 'json_parse_error'
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%unterminated%' THEN 'truncated_output'
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%schema%' THEN 'schema_validation_error'
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%validation%' THEN 'schema_validation_error'
+            WHEN LOWER(COALESCE(error_message, '')) LIKE '%model%' THEN 'model_load_error'
+            ELSE 'legacy_unknown_failure'
+        END
+        WHERE success = 0
+          AND (error_type IS NULL OR error_type = '' OR error_type = 'legacy_unknown_failure')
+          AND error_message IS NOT NULL
+          AND error_message != ''
+          AND error_message != 'Failure was recorded before error diagnostics were added.'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE model_runs
+        SET
+            error_type = COALESCE(error_type, 'legacy_unknown_failure'),
+            error_message = COALESCE(
+                error_message,
+                'Failure was recorded before error diagnostics were added.'
+            )
+        WHERE success = 0
+          AND (error_type IS NULL OR error_type = '' OR error_message IS NULL OR error_message = '')
+        """
+    )
 
 
 def table_count(conn: sqlite3.Connection, table: str) -> int:

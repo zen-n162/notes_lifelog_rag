@@ -531,15 +531,20 @@ def generate_timeline_snapshots(
     for index, month in enumerate(values, start=1):
         if progress_callback:
             progress_callback(index - 1, total, month)
-        snapshots.append(
-            generate_month_timeline_snapshot(
-                month,
-                db_path=db_path,
-                backend=backend,
-                force=force,
-                dry_run=dry_run,
+        try:
+            snapshots.append(
+                generate_month_timeline_snapshot(
+                    month,
+                    db_path=db_path,
+                    backend=backend,
+                    force=force,
+                    dry_run=dry_run,
+                )
             )
-        )
+        except Exception:
+            # All-month generation should be resume-safe: one malformed month
+            # must not prevent other month cards from being built.
+            continue
         if progress_callback:
             progress_callback(index, total, month)
     return snapshots
@@ -626,8 +631,14 @@ def format_month_timeline_markdown(snapshot: MonthTimelineSnapshot) -> str:
     if warnings:
         lines.extend(["", "### Quality Warnings", *[f"- {warning}" for warning in warnings]])
     lines.extend(["", "### Timeline Items"])
-    for item in sorted(snapshot.items, key=lambda row: row.sort_key):
-        lines.append(f"- {item.date_label or '日付不明'} [{item.item_type}] {item.title}: {item.summary} (`{item.source_note_id[:12]}`)")
+    sorted_items = sorted(snapshot.items, key=lambda row: row.sort_key)
+    for item in sorted_items[:20]:
+        lines.append(
+            f"- {item.date_label or '日付不明'} [{item.item_type}] "
+            f"{_short(item.title, 80)}: {_short(item.summary, 120)} (`{item.source_note_id[:12]}`)"
+        )
+    if len(sorted_items) > 20:
+        lines.append(f"- ... (+{len(sorted_items) - 20} more items; open the GUI Timeline tab for detail)")
     return "\n".join(lines)
 
 
@@ -816,7 +827,7 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
         categories = category_by_note.get(row.get("note_id"), [])
         items.append(
             MonthTimelineItem(
-                id=_stable_id("event", row.get("id"), row.get("note_id"), row.get("title")),
+                id=_stable_id("event", month, row.get("id"), row.get("note_id"), row.get("title")),
                 month=month,
                 date_start=_date_start(date_value),
                 date_end="",
@@ -846,7 +857,7 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
         categories = category_by_note.get(row.get("note_id"), [])
         items.append(
             MonthTimelineItem(
-                id=_stable_id("thought", row.get("id"), row.get("note_id"), row.get("title")),
+                id=_stable_id("thought", month, row.get("id"), row.get("note_id"), row.get("title")),
                 month=month,
                 date_start=_date_start(date_value),
                 date_end="",
@@ -880,7 +891,7 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
             continue
         items.append(
             MonthTimelineItem(
-                id=_stable_id("summary", row.get("id"), row.get("content_hash")),
+                id=_stable_id("summary", month, row.get("id"), row.get("content_hash")),
                 month=month,
                 date_start=_date_start(date_value),
                 date_end="",
@@ -910,7 +921,7 @@ def _build_month_timeline_items_from_sources(sources: dict[str, Any]) -> list[Mo
         categories = category_by_note.get(note_id, [])
         items.append(
             MonthTimelineItem(
-                id=_stable_id("suggestion", row.get("id"), note_id, row.get("title")),
+                id=_stable_id("suggestion", month, row.get("id"), note_id, row.get("title")),
                 month=month,
                 date_start=_date_start(date_value),
                 date_end="",

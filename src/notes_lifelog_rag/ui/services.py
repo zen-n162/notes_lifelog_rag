@@ -885,10 +885,15 @@ def get_quality_warnings(
         if wanted("model_run_failure"):
             failures = conn.execute(
                 """
-                SELECT task_name, model_name, error_message, created_at
+                SELECT model_runs.task_name, model_runs.model_name, model_runs.note_id,
+                       notes.title, notes.source_relative_path,
+                       COALESCE(NULLIF(model_runs.error_type, ''), 'legacy_unknown_failure') AS error_type,
+                       COALESCE(NULLIF(model_runs.error_message, ''), 'model run failed') AS error_message,
+                       model_runs.created_at
                 FROM model_runs
-                WHERE success = 0
-                ORDER BY created_at DESC
+                LEFT JOIN notes ON notes.id = model_runs.note_id
+                WHERE model_runs.success = 0
+                ORDER BY model_runs.created_at DESC
                 LIMIT ?
                 """,
                 (int(limit),),
@@ -897,10 +902,10 @@ def get_quality_warnings(
                 warnings.append(
                     {
                         "warning_type": "model_run_failure",
-                        "note_id": "",
-                        "title": row["task_name"],
-                        "source_path": row["model_name"],
-                        "issue": row["error_message"] or "model run failed",
+                        "note_id": row["note_id"] or "",
+                        "title": row["title"] or row["task_name"],
+                        "source_path": row["source_relative_path"] or row["model_name"],
+                        "issue": f"{row['error_type']}: {row['error_message']}",
                         "confidence": None,
                         "importance": None,
                         "evidence": [],
@@ -1220,7 +1225,8 @@ def _model_runs_for_note(conn: sqlite3.Connection, note: sqlite3.Row) -> list[di
     placeholders = ",".join("?" for _ in hashes)
     rows = conn.execute(
         f"""
-        SELECT task_name, model_name, success, error_message, prompt_version, empty_result, created_at
+        SELECT task_name, model_name, success, error_type, error_message, prompt_version,
+               empty_result, retry_count, fallback_used, created_at
         FROM model_runs
         WHERE input_hash IN ({placeholders})
         ORDER BY created_at DESC

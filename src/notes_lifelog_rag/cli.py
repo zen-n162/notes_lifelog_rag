@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Annotated
 
 import typer
@@ -12,6 +13,7 @@ from rich.table import Table
 from notes_lifelog_rag import __version__
 from notes_lifelog_rag.analysis.service import (
     AnalysisSummary,
+    analyze_sample,
     analyze_all,
     categorize_notes,
     extract_events,
@@ -117,6 +119,153 @@ def stats_command(
         ):
             table.add_row(name, str(table_count(conn, name)))
         console.print(table)
+
+
+@app.command("db-schema")
+def db_schema_command(
+    table: Annotated[str, typer.Option("--table", help="Table name to inspect.")] = "model_runs",
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    init_db(db)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+        console.print("[red]Invalid table name.[/red]")
+        raise typer.Exit(code=1)
+    with connect(db) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'virtual table') AND name = ?",
+            (table,),
+        ).fetchone()
+        if not exists:
+            console.print(f"[red]Table not found:[/red] {table}")
+            raise typer.Exit(code=1)
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    output = Table(title=f"DB Schema: {table}")
+    output.add_column("cid", justify="right")
+    output.add_column("name")
+    output.add_column("type")
+    output.add_column("notnull")
+    output.add_column("default")
+    output.add_column("pk")
+    for row in rows:
+        output.add_row(
+            str(row["cid"]),
+            str(row["name"]),
+            str(row["type"]),
+            str(row["notnull"]),
+            str(row["dflt_value"] or ""),
+            str(row["pk"]),
+        )
+    console.print(output)
+
+
+@app.command("analysis-failures")
+def analysis_failures_command(
+    task: Annotated[str | None, typer.Option("--task", help="Filter by task name.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="Maximum failed rows to show.")] = 50,
+    group_by_error: Annotated[bool, typer.Option("--group-by-error", help="Group failures by task and error type.")] = False,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    init_db(db)
+    with connect(db) as conn:
+        if group_by_error:
+            params: tuple[object, ...] = (task,) if task else ()
+            where = "WHERE success = 0"
+            if task:
+                where += " AND task_name = ?"
+            rows = conn.execute(
+                f"""
+                SELECT task_name, COALESCE(NULLIF(error_type, ''), 'legacy_unknown_failure') AS error_type,
+                       COUNT(*) AS count
+                FROM model_runs
+                {where}
+                GROUP BY task_name, COALESCE(NULLIF(error_type, ''), 'legacy_unknown_failure')
+                ORDER BY count DESC, task_name ASC
+                """,
+                params,
+            ).fetchall()
+            table = Table(title="Analysis Failures by Error")
+            table.add_column("Task")
+            table.add_column("Error type")
+            table.add_column("Count", justify="right")
+            for row in rows:
+                table.add_row(row["task_name"], row["error_type"], str(row["count"]))
+            console.print(table)
+            return
+
+        params = [task] if task else []
+        where = "WHERE model_runs.success = 0"
+        if task:
+            where += " AND model_runs.task_name = ?"
+        rows = conn.execute(
+            f"""
+            SELECT
+                model_runs.task_name,
+                model_runs.model_name,
+                model_runs.note_id,
+                notes.title,
+                notes.source_relative_path AS source_path,
+                model_runs.success,
+                COALESCE(NULLIF(model_runs.error_type, ''), 'legacy_unknown_failure') AS error_type,
+                COALESCE(
+                    NULLIF(model_runs.error_message, ''),
+                    'Failure was recorded before error diagnostics were added.'
+                ) AS error_message,
+                model_runs.created_at,
+                model_runs.input_hash,
+                model_runs.body_hash,
+                model_runs.raw_output,
+                model_runs.output_json
+            FROM model_runs
+            LEFT JOIN notes ON notes.id = model_runs.note_id
+            {where}
+            ORDER BY model_runs.created_at DESC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        ).fetchall()
+    table = Table(title="Analysis Failures")
+    for column in [
+        "Task",
+        "Model",
+        "Note ID",
+        "Title",
+        "Source",
+        "Error type",
+        "Error message",
+        "Created",
+        "Input hash",
+        "Body hash",
+        "Raw preview",
+        "Output preview",
+    ]:
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            str(row["task_name"]),
+            str(row["model_name"]),
+            _short_cell(row["note_id"], 12),
+            _short_cell(row["title"], 28),
+            _short_cell(row["source_path"], 32),
+            str(row["error_type"]),
+            _short_cell(row["error_message"], 80),
+            str(row["created_at"] or ""),
+            _short_cell(row["input_hash"], 12),
+            _short_cell(row["body_hash"], 12),
+            _short_cell(row["raw_output"], 500),
+            _short_cell(row["output_json"], 500),
+        )
+    console.print(table)
+    if rows:
+        console.print("Failure previews:")
+        for row in rows:
+            console.print(
+                "- "
+                f"{row['task_name']} "
+                f"{row['error_type']} "
+                f"note={_short_cell(row['note_id'], 12) or '-'} "
+                f"input={_short_cell(row['input_hash'], 12)} "
+                f"message={_short_cell(row['error_message'], 120)}"
+            )
 
 
 @app.command("model-status")
@@ -645,6 +794,68 @@ def analyze_all_command(
         _print_analysis_summary(summary)
 
 
+@app.command("analyze-sample")
+def analyze_sample_command(
+    task: Annotated[str, typer.Option("--task", help="summary, categories, events, or thoughts.")] = "summary",
+    note_id: Annotated[str | None, typer.Option("--note-id", help="Analyze a specific note id.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="Maximum sample notes.")] = 1,
+    show_prompt: Annotated[bool, typer.Option("--show-prompt", help="Show the prompt sent to the local backend.")] = False,
+    show_raw_output: Annotated[bool, typer.Option("--show-raw-output", help="Show raw model output preview.")] = False,
+    save: Annotated[bool, typer.Option("--save", help="Store the parsed output and model_run diagnostics.")] = False,
+    backend: Annotated[str, typer.Option("--backend", help="auto, local, mock, or disabled.")] = "auto",
+    device: Annotated[str, typer.Option("--device", help="auto, cpu, cuda, or cuda:N.")] = "auto",
+    require_cuda: Annotated[bool, typer.Option("--require-cuda", help="Fail if CUDA cannot be used.")] = False,
+    dtype: Annotated[str, typer.Option("--dtype", help="auto, float32, float16, or bfloat16.")] = "auto",
+    max_new_tokens: Annotated[int, typer.Option("--max-new-tokens", min=1, help="Maximum generated tokens.")] = 1024,
+    show_device: Annotated[bool, typer.Option("--show-device", help="Show resolved device details.")] = False,
+    no_cpu_fallback: Annotated[
+        bool,
+        typer.Option("--no-cpu-fallback", help="Fail instead of falling back to CPU when CUDA is requested."),
+    ] = False,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    device_info = _resolve_cli_device(device, require_cuda, no_cpu_fallback, dtype)
+    if show_device:
+        _print_device_info(device_info, dtype=dtype, backend=backend, max_new_tokens=max_new_tokens)
+    try:
+        results = analyze_sample(
+            task_name=task,
+            db_path=db,
+            note_id=note_id,
+            limit=limit,
+            backend_name=backend,
+            device_info=device_info,
+            dtype=dtype,
+            max_new_tokens=max_new_tokens,
+            save=save,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    if not results:
+        console.print("[yellow]No sample notes found.[/yellow]")
+        return
+    for result in results:
+        table = Table(title=f"Analyze Sample: {result.task_name} / {result.note_id[:12]}")
+        table.add_column("Metric")
+        table.add_column("Value")
+        table.add_row("Title", result.title)
+        table.add_row("Model", result.model_name)
+        table.add_row("Success", "yes" if result.success else "no")
+        table.add_row("Saved", "yes" if result.saved else "no")
+        if result.error_type:
+            table.add_row("Error type", result.error_type)
+        if result.error_message:
+            table.add_row("Error message", result.error_message)
+        if result.parsed_json is not None:
+            table.add_row("Parsed JSON", json.dumps(result.parsed_json, ensure_ascii=False, indent=2)[:2000])
+        if show_prompt:
+            table.add_row("Prompt", _short_cell(result.prompt, 2000))
+        if show_raw_output:
+            table.add_row("Raw output", _short_cell(result.raw_output, 2000))
+        console.print(table)
+
+
 @app.command("timeline")
 def timeline_command(
     month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
@@ -886,6 +1097,12 @@ def ui_command(
     from notes_lifelog_rag.ui.app import launch_ui
 
     launch_ui(host=host, port=port)
+
+
+def _short_cell(value: object, limit: int = 80) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _resolve_cli_device(device: str, require_cuda: bool, no_cpu_fallback: bool, dtype: str) -> DeviceInfo:

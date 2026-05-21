@@ -12,6 +12,7 @@ from notes_lifelog_rag.timeline.service import (
     format_timeline_report,
     format_timeline_markdown,
     generate_month_timeline_snapshot,
+    generate_timeline_snapshots,
     get_month_sources,
     list_timeline_months,
     timeline_qa,
@@ -98,6 +99,17 @@ def test_month_timeline_snapshot_rule_backend_and_quality(tmp_path: Path) -> Non
     assert "この月の概要" in markdown
     assert "Test Timeline" in report
     assert qa and "quality_score" in qa[0]
+
+    with connect(db_path) as conn:
+        snapshot_count = table_count(conn, "monthly_timeline_snapshots")
+    dry_rows = generate_timeline_snapshots(all_months=True, db_path=db_path, backend="rule", dry_run=True)
+    with connect(db_path) as conn:
+        assert dry_rows
+        assert table_count(conn, "monthly_timeline_snapshots") == snapshot_count
+
+    output = tmp_path / "timeline.md"
+    output.write_text(format_timeline_report([stored], title="Timeline 2026"), encoding="utf-8")
+    assert "Timeline 2026" in output.read_text(encoding="utf-8")
 
 
 def test_month_timeline_quality_warnings_for_title_only_and_fallback(tmp_path: Path) -> None:

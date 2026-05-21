@@ -249,13 +249,31 @@ as completed work, which prevents notes with no extracted events or thoughts
 from blocking later `--only-missing --limit` batches. Each note is committed
 independently so the batch can be resumed after interruption.
 
+`model_runs` also records failure diagnostics. New rows include `note_id`,
+`body_hash`, `prompt_version`, `raw_output`, `error_type`, `error_message`,
+`empty_result`, `retry_count`, and `fallback_used`. Legacy failed rows are
+backfilled with `legacy_unknown_failure` or a best-effort classification such as
+`json_parse_error`, `truncated_output`, `cuda_oom`, or `model_load_error`.
+Use these commands when local LLM output fails to parse:
+
 ```bash
 python -m notes_lifelog_rag.cli analyze-all --only-missing --dry-run
 python -m notes_lifelog_rag.cli analyze-all --only-missing
 python -m notes_lifelog_rag.cli analyze-all --only-missing --limit 10
 python -m notes_lifelog_rag.cli summarize-notes --only-missing --limit 100
 python -m notes_lifelog_rag.cli extract-events --force
+python -m notes_lifelog_rag.cli analysis-failures --group-by-error
+python -m notes_lifelog_rag.cli analysis-failures --task events --limit 20
+python -m notes_lifelog_rag.cli db-schema --table model_runs
+python -m notes_lifelog_rag.cli analyze-sample --task summary --backend local --device auto --max-new-tokens 1024 --show-raw-output
 ```
+
+`analyze-sample` analyzes one or a few notes for debugging and does not save to
+the DB unless `--save` is passed. It can show the prompt, raw model output,
+parsed JSON, and classified error type without changing analysis tables.
+JSON parsing is intentionally lenient: fenced JSON, text before/after JSON,
+trailing commas, common full-width quotes, empty output, and truncated output
+are handled or classified so the original raw output is not lost.
 
 By default, analysis uses a local model when the runtime is enabled and falls
 back to the deterministic mock backend otherwise. To require the real local LLM
@@ -271,10 +289,12 @@ python -m notes_lifelog_rag.cli summarize-notes --backend local
 python -m notes_lifelog_rag.cli timeline-months
 python -m notes_lifelog_rag.cli generate-timeline --month 2026-05 --backend rule --dry-run
 python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule
+python -m notes_lifelog_rag.cli generate-timeline --all-months --backend rule --force
 python -m notes_lifelog_rag.cli timeline --month 2026-05
 python -m notes_lifelog_rag.cli timeline --month 2026-05 --rich
 python -m notes_lifelog_rag.cli timeline --year 2026 --monthly --order asc
 python -m notes_lifelog_rag.cli timeline-report --year 2026 --output data/exports/timelines/timeline_2026.md
+python -m notes_lifelog_rag.cli timeline-qa --all-months
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05
 python -m notes_lifelog_rag.cli reflections --month 2026-05 --force
 python -m notes_lifelog_rag.cli generate-reflections --all-months
@@ -296,6 +316,9 @@ The generated data is stored in `monthly_timeline_snapshots` and
 `monthly_timeline_items`. `--dry-run` previews the month card without writing DB
 rows. `--force` replaces only the target month's timeline snapshot/items; it
 does not truncate the whole database.
+When running `--all-months`, generation continues month-by-month even if one
+month has malformed source data, and item IDs include the month so source items
+that appear in more than one month do not collide.
 
 Use `timeline-months` to see month coverage and whether a saved snapshot exists.
 Use `timeline --month 2026-05 --rich` to read a rich month detail. Use

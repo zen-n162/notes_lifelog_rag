@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import json
 import os
 from pathlib import Path
-import re
 from typing import Any, Protocol
 
+from notes_lifelog_rag.llm.json_utils import LenientJSONError, parse_json_lenient
 from notes_lifelog_rag.llm.mock import MockLLMBackend
 from notes_lifelog_rag.models.status import has_module, resolve_model_entry, status_for_model
 from notes_lifelog_rag.runtime.device import (
@@ -68,6 +67,10 @@ class LocalTransformersLLMBackend:
         return "missing runtime dependency: transformers+torch"
 
     def generate_json(self, task_name: str, note: dict, *, categories: list[str] | None = None) -> dict:
+        payload, _raw_output = self.generate_with_raw(task_name, note, categories=categories)
+        return payload
+
+    def generate_with_raw(self, task_name: str, note: dict, *, categories: list[str] | None = None) -> tuple[dict, str]:
         error = self.availability_error()
         if error:
             raise RuntimeError(error)
@@ -94,7 +97,7 @@ class LocalTransformersLLMBackend:
         with torch.inference_mode(), autocast_context(torch, device_info, dtype_value):
             output_ids = model.generate(**inputs, **generate_kwargs)
         generated = tokenizer.decode(output_ids[0][inputs["input_ids"].shape[-1] :], skip_special_tokens=True)
-        return _parse_json_object(generated)
+        return _parse_json_object(generated), generated
 
     def _load_runtime(self) -> Any:
         if self._runtime is not None:
@@ -205,12 +208,16 @@ def _prompt_for(task_name: str, note: dict, categories: list[str]) -> str:
     return base + "JSON objectのみを返してください。"
 
 
+def build_prompt(task_name: str, note: dict, categories: list[str] | None = None) -> str:
+    return _prompt_for(task_name, note, categories or [])
+
+
 def _parse_json_object(text: str) -> dict:
-    stripped = text.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise
+    value = parse_json_lenient(text)
+    if not isinstance(value, dict):
+        raise LenientJSONError(
+            "schema_validation_error",
+            f"Expected a JSON object but got {type(value).__name__}.",
+            raw_output=text,
+        )
+    return value

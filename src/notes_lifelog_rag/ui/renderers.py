@@ -627,7 +627,8 @@ def _render_model_runs(model_runs: list[dict[str, Any]]) -> str:
         status = "success" if row.get("success") else "failed"
         rows.append(
             f"<tr><td>{escape(str(row.get('task_name') or ''))}</td><td>{escape(status)}</td>"
-            f"<td>{escape(str(row.get('model_name') or ''))}</td><td>{escape(str(row.get('prompt_version') or ''))}</td></tr>"
+            f"<td>{escape(str(row.get('model_name') or ''))}</td><td>{escape(str(row.get('prompt_version') or ''))}</td>"
+            f"<td>{escape(str(row.get('error_type') or ''))}</td></tr>"
         )
     return '<section class="paper-section"><h2>Model Runs</h2><table class="model-run-table"><tbody>' + "".join(rows) + "</tbody></table></section>"
 
