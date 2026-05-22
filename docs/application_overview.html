@@ -591,6 +591,12 @@ python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --forma
 python -m notes_lifelog_rag.cli timeline-qa --month 2026-05 --show-items --format pretty
 python -m notes_lifelog_rag.cli timeline-qa --all-months --only-problems --show-items --format markdown --output data/exports/timelines/timeline_qa_report.md
 python -m notes_lifelog_rag.cli timeline-qa --all-months --format json --output data/exports/timelines/timeline_qa_report.json
+python -m notes_lifelog_rag.cli timeline-review list --month 2026-05
+python -m notes_lifelog_rag.cli timeline-review hide --item-id ITEM_ID --reason "noisy pdf"
+python -m notes_lifelog_rag.cli timeline-review verify --item-id ITEM_ID --comment "重要な研究メモ"
+python -m notes_lifelog_rag.cli timeline-review needs-fix --item-id ITEM_ID --reason "weak evidence"
+python -m notes_lifelog_rag.cli timeline-review exclude-note --note-id NOTE_ID --reason "scanner noise"
+python -m notes_lifelog_rag.cli timeline-review reanalysis-plan --month 2026-05 --output data/exports/timelines/reanalysis_plan_2026-05.md
 python -m notes_lifelog_rag.cli reflections --month 2026-05
 python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
         </section>
@@ -691,6 +697,31 @@ python -m notes_lifelog_rag.cli ui --host 127.0.0.1 --port 7860</code></pre>
             <code>info_warnings</code>, <code>problem_items</code>, <code>quality_flags</code> を含む後続処理用です。
             GUI Timeline detailにもQA score、severe/review/info badges、problem items、source_note_idを表示し、
             problem itemから元メモdetail previewを開けます。
+          </p>
+          <p>
+            Phase 9では Timeline Review / Curation Workflow を追加しました。
+            <code>timeline_review_actions</code> に <code>verify</code>, <code>hide</code>,
+            <code>pin</code>, <code>mark_needs_fix</code>, <code>dismiss_warning</code>,
+            <code>exclude_source_note</code>, <code>request_reanalysis</code> などの操作を保存します。
+            これにより、noisy PDFやscan由来のitemをDBから削除せずTimeline上だけ非表示にしたり、
+            確認済みitemのwarning影響を弱めたり、再分析が必要なitemを
+            <code>timeline-review reanalysis-plan</code> に集められます。
+          </p>
+          <p>
+            QA Markdown / JSON report の problem item には <code>item_id</code>,
+            <code>source_note_id</code>, <code>suggested_action</code>,
+            <code>review_commands</code> が含まれます。たとえば
+            <code>timeline-review hide --item-id ...</code> でnoisy itemを隠し、
+            <code>timeline-review verify --item-id ...</code> で人間確認済みにし、
+            <code>timeline-review needs-fix --item-id ...</code> で再分析対象にできます。
+            通常の <code>timeline</code>, <code>timeline-report</code>, <code>timeline-qa</code>
+            はhidden/excluded itemを表示せず、監査時だけ <code>--include-hidden</code> を使います。
+          </p>
+          <p>
+            GUI Timeline detailでは、Timeline itemやQA problem itemをクリックすると元メモpreviewと
+            review targetが選択されます。Reason/commentを入力し、Verify / Hide / Pin /
+            Needs Fix / Exclude Source Note ボタンでローカルDBにreview actionを保存します。
+            操作後はdetailがrefreshされ、非表示itemは通常の月カードから外れます。
           </p>
           <p>
             GUI の Timeline タブでは Year / Month / Category / Theme / Item type / Sort を選び、

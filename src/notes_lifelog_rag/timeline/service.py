@@ -18,6 +18,11 @@ from notes_lifelog_rag.timeline.month_narrative import (
     build_revisit_reasons as build_narrative_revisit_reasons,
     summarize_grouped_item,
 )
+from notes_lifelog_rag.timeline.review import (
+    ReviewState,
+    action_counts_for_items,
+    active_review_state,
+)
 
 
 @dataclass(frozen=True)
@@ -184,12 +189,14 @@ REVIEW_WARNINGS = {
     "low_direct_thoughts",
     "fallback_heavy",
     "suggestions_dominated",
+    "needs_fix",
 }
 INFO_WARNINGS = {
     "date_modified_only",
     "date_note_created",
     "grouped_items_present",
     "low_priority_hidden",
+    "reviewed_items_present",
 }
 WARNING_ALIASES = {
     "invalid_month_1900": "invalid_month",
@@ -599,7 +606,19 @@ def generate_month_timeline_snapshot(
     sources = get_month_sources(month, db_path=db_path)
     selected_month = sources.get("month") or _normalize_month(month) or month
     items = _build_month_timeline_items_from_sources(sources, limits=limits)
+    review_state = active_review_state(month=selected_month, db_path=db_path)
+    # Source-note exclusions are curation decisions that should survive
+    # regeneration. Item-level hide/verify/pin actions are applied at display
+    # time so the stored raw timeline remains reversible.
+    items = _apply_review_to_items(
+        items,
+        review_state,
+        include_hidden=False,
+        source_exclusions_only=True,
+    )
     source_counts = _source_counts_from_sources(sources)
+    if review_state.excluded_source_note_ids:
+        source_counts["excluded_source_notes"] = len(review_state.excluded_source_note_ids)
     source_hash = _source_hash(sources, items)
     now = datetime.now(tz=timezone.utc).isoformat()
     title = _month_title(selected_month, sources, items)
@@ -698,6 +717,7 @@ def get_month_timeline_snapshot(
     *,
     db_path: str | Path | None = None,
     generate_if_missing: bool = True,
+    include_hidden: bool = False,
 ) -> MonthTimelineSnapshot | None:
     selected_month = _normalize_month(month)
     if not selected_month:
@@ -716,9 +736,14 @@ def get_month_timeline_snapshot(
         ).fetchone()
         if row:
             items = _stored_month_items(conn, selected_month)
-            return _snapshot_from_row(row, items)
+            return _apply_review_to_snapshot(
+                _snapshot_from_row(row, items),
+                db_path=db_path,
+                include_hidden=include_hidden,
+            )
     if generate_if_missing:
-        return generate_month_timeline_snapshot(selected_month, db_path=db_path, dry_run=True)
+        snapshot = generate_month_timeline_snapshot(selected_month, db_path=db_path, dry_run=True)
+        return _apply_review_to_snapshot(snapshot, db_path=db_path, include_hidden=include_hidden)
     return None
 
 
@@ -730,6 +755,7 @@ def list_month_timeline_snapshots(
     limit: int | None = None,
     include_unknown: bool = False,
     include_future: bool = False,
+    include_hidden: bool = False,
 ) -> list[MonthTimelineSnapshot]:
     months = [
         item.month
@@ -746,9 +772,81 @@ def list_month_timeline_snapshots(
         months = months[: max(0, int(limit))]
     output = []
     for month in months:
-        snapshot = get_month_timeline_snapshot(month, db_path=db_path, generate_if_missing=True)
+        snapshot = get_month_timeline_snapshot(
+            month,
+            db_path=db_path,
+            generate_if_missing=True,
+            include_hidden=include_hidden,
+        )
         if snapshot:
             output.append(snapshot)
+    return output
+
+
+def _apply_review_to_snapshot(
+    snapshot: MonthTimelineSnapshot,
+    *,
+    db_path: str | Path | None,
+    include_hidden: bool = False,
+) -> MonthTimelineSnapshot:
+    state = active_review_state(month=snapshot.month, db_path=db_path)
+    items = _apply_review_to_items(snapshot.items, state, include_hidden=include_hidden)
+    quality = dict(snapshot.quality or {})
+    counts = action_counts_for_items(snapshot.items, state)
+    quality["review_counts"] = counts
+    if counts.get("verified_items_count"):
+        quality.setdefault("info_warnings", [])
+        if "reviewed_items_present" not in quality["info_warnings"]:
+            quality["info_warnings"].append("reviewed_items_present")
+    return replace(snapshot, items=items, quality=quality)
+
+
+def _apply_review_to_items(
+    items: list[MonthTimelineItem],
+    state: ReviewState,
+    *,
+    include_hidden: bool = False,
+    source_exclusions_only: bool = False,
+) -> list[MonthTimelineItem]:
+    output: list[MonthTimelineItem] = []
+    hidden_ids = state.hidden_item_ids | state.excluded_item_ids
+    for item in items:
+        source_excluded = bool(item.source_note_id and item.source_note_id in state.excluded_source_note_ids)
+        item_hidden = item.id in hidden_ids
+        if source_excluded and not include_hidden:
+            continue
+        if source_exclusions_only:
+            output.append(item)
+            continue
+        if item_hidden and not include_hidden:
+            continue
+        flags = list(item.quality_flags or [])
+        confidence = item.confidence
+        importance = item.importance
+        categories = list(item.categories or [])
+        if item.id in state.verified_item_ids:
+            flags = [flag for flag in flags if flag not in {"weak_evidence", "title_only_evidence", "low_confidence"}]
+            confidence = max(confidence, 0.55)
+            categories.append("review:verified")
+        if item.id in state.pinned_item_ids:
+            importance = max(importance, 0.95)
+            categories.append("review:pinned")
+        if item.id in state.needs_fix_item_ids or item.id in state.request_reanalysis_item_ids:
+            flags.append("needs_fix")
+            categories.append("review:needs_fix")
+        if item_hidden:
+            categories.append("review:hidden")
+        if source_excluded:
+            categories.append("review:excluded_source")
+        output.append(
+            replace(
+                item,
+                confidence=confidence,
+                importance=importance,
+                categories=_dedupe_str_list(categories),
+                quality_flags=sorted(set(flags)),
+            )
+        )
     return output
 
 
@@ -880,6 +978,8 @@ def timeline_qa(
     db_path: str | Path | None = None,
     include_unknown: bool = False,
     include_future: bool = False,
+    include_hidden: bool = False,
+    include_reviewed: bool = False,
     show_items: bool = False,
     only_problems: bool = False,
 ) -> list[dict[str, Any]]:
@@ -898,7 +998,12 @@ def timeline_qa(
     for value in months:
         if not value:
             continue
-        snapshot = get_month_timeline_snapshot(value, db_path=db_path, generate_if_missing=True)
+        snapshot = get_month_timeline_snapshot(
+            value,
+            db_path=db_path,
+            generate_if_missing=True,
+            include_hidden=include_hidden,
+        )
         if snapshot is None:
             severe_warnings = ["evidence_missing"]
             rows.append(
@@ -917,16 +1022,27 @@ def timeline_qa(
                 }
             )
             continue
+        review_state = active_review_state(month=snapshot.month, db_path=db_path)
         severity = timeline_qa_severity_for_snapshot(snapshot)
         severe_warnings = list(severity["severe_warnings"])
         review_warnings = list(severity["review_warnings"])
         info_warnings = list(severity["info_warnings"])
-        warnings = severe_warnings + review_warnings
         score = max(0.0, min(1.0, float(snapshot.quality.get("quality_score", 0.0))))
-        if only_problems and not (severe_warnings or review_warnings):
-            continue
         display_groups = timeline_item_display_groups(snapshot.items, grouped=True)
         warning_items = _timeline_warning_items(snapshot, display_groups)
+        if not include_reviewed:
+            warning_items = _filter_reviewed_warning_items(warning_items, review_state)
+            active_item_warnings = set(warning_items)
+            review_warnings = [warning for warning in review_warnings if warning in active_item_warnings or warning.startswith("low_direct_") or warning in {"fallback_heavy", "suggestions_dominated"}]
+            severe_warnings = [warning for warning in severe_warnings if warning in active_item_warnings or warning in {"no_direct_sources", "future_month_without_sources", "invalid_month", "unknown_date_heavy"}]
+        review_counts = action_counts_for_items(snapshot.items, review_state)
+        if review_counts.get("verified_items_count"):
+            score = min(1.0, score + 0.05)
+        if review_counts.get("needs_fix_count") and "needs_fix" not in review_warnings:
+            review_warnings.append("needs_fix")
+        warnings = severe_warnings + review_warnings
+        if only_problems and not (severe_warnings or review_warnings):
+            continue
         problem_items = {
             warning: items
             for warning, items in warning_items.items()
@@ -944,11 +1060,14 @@ def timeline_qa(
             "recommended_action": _timeline_qa_action(warnings + info_warnings, snapshot=snapshot),
             "problem_items": problem_items,
             "quality_flags": _timeline_quality_flags(snapshot.items),
+            **review_counts,
         }
         if show_items:
             display_items = display_groups["main"] + display_groups["suggestions"] + display_groups["low_priority"]
             qa_row["items"] = [
                 {
+                    "item_id": item.grouped_item_ids[0] if item.grouped_item_ids else item.id,
+                    "display_item_id": item.id,
                     "type": item.item_type,
                     "title": _short(item.title, 60),
                     "source_note_id": item.source_note_id,
@@ -999,6 +1118,21 @@ def format_timeline_qa_pretty(rows: list[dict[str, Any]], *, markdown: bool = Fa
             if key not in {"notes", "summaries", "events", "thoughts", "suggestions", "monthly_reflections", "categories"}:
                 lines.append(f"- {key}: {value}")
         lines.extend(["", "Recommended action:", f"- {row.get('recommended_action') or 'Timeline detailを確認してください。'}"])
+        review_counts = {
+            key: row.get(key, 0)
+            for key in (
+                "reviewed_items_count",
+                "hidden_items_count",
+                "verified_items_count",
+                "needs_fix_count",
+                "excluded_source_notes_count",
+            )
+            if row.get(key, 0)
+        }
+        if review_counts:
+            lines.append("Review state:")
+            for key, value in review_counts.items():
+                lines.append(f"- {key}: {value}")
         warning_items = row.get("problem_items") or row.get("warning_items") or {}
         lines.append("Problem items:")
         if warning_items:
@@ -1009,12 +1143,18 @@ def format_timeline_qa_pretty(rows: list[dict[str, Any]], *, markdown: bool = Fa
                     lines.extend(
                         [
                             f"- {item.get('title') or 'Untitled'}",
+                            f"  - item_id: {item.get('item_id') or ''}",
                             f"  - source_note_id: {item.get('source_note_id') or ''}",
                             f"  - item_type: {item.get('item_type') or ''}",
                             f"  - flags: {flags}",
                             f"  - reason: {item.get('reason') or ''}",
+                            f"  - suggested_action: {item.get('suggested_action') or ''}",
                         ]
                     )
+                    commands = item.get("review_commands") or {}
+                    if commands:
+                        preferred = commands.get(str(item.get("suggested_action") or "").replace("-", "_")) or commands.get("hide") or next(iter(commands.values()))
+                        lines.append(f"  - review_command: {preferred}")
         else:
             lines.append("- show with --show-items")
         lines.append("")
@@ -1056,6 +1196,8 @@ def format_timeline_qa_markdown(rows: list[dict[str, Any]]) -> str:
             "## Recommended Next Actions",
             "- evidence_missing / title_only_evidence がある月は、元メモ本文のquoteを確認してください。",
             "- noisy_items_present / low_value_items_present がある月は、Low Priority itemsを確認してください。",
+            "- noisy itemは `timeline-review hide --item-id ...`、確認済みitemは `timeline-review verify --item-id ...` でcurationできます。",
+            "- 修正対象にしたitemは `timeline-review needs-fix --item-id ...` 後、`timeline-review reanalysis-plan` で再分析計画を確認してください。",
             "- low_direct_thoughts / low_direct_events が続く月は、extract-thoughts / extract-events 後に generate-timeline --force を実行してください。",
             "- future_month_without_sources / invalid_month がある場合は、日付帰属を確認してください。",
         ]
@@ -2775,6 +2917,8 @@ def _month_item_from_row(row) -> MonthTimelineItem:
 def _timeline_qa_action(warnings: list[str], *, snapshot: MonthTimelineSnapshot | None = None) -> str:
     if not warnings:
         return "ready"
+    if "needs_fix" in warnings:
+        return "Needs FixにされたTimeline itemがあります。timeline-review reanalysis-planで再分析対象を確認してください。"
     source_counts = snapshot.source_counts if snapshot else {}
     if "future_month_without_sources" in warnings:
         return "未来月ですが直接ソースがありません。必要なら --include-future で確認し、日付帰属を見直してください。"
@@ -2810,13 +2954,27 @@ def _timeline_warning_items(
     mapping: dict[str, list[dict[str, Any]]] = {}
 
     def add(warning: str, item: TimelineDisplayItem, reason: str) -> None:
+        item_id = item.grouped_item_ids[0] if item.grouped_item_ids else item.id
         mapping.setdefault(warning, []).append(
             {
+                "item_id": item_id,
+                "display_item_id": item.id,
+                "month": item.month,
                 "title": _short(item.title, 80),
                 "item_type": item.item_type,
                 "source_note_id": item.source_note_id,
                 "quality_flags": item.quality_flags,
                 "reason": reason,
+                "suggested_action": _suggested_review_action(warning, item),
+                "review_actions_available": [
+                    "verify",
+                    "hide",
+                    "pin",
+                    "needs-fix",
+                    "exclude-note",
+                    "dismiss-warning",
+                ],
+                "review_commands": _review_commands(item_id, item.source_note_id, warning),
             }
         )
 
@@ -2843,6 +3001,55 @@ def _timeline_warning_items(
             add("date_modified_only", pseudo, "uses note.modified_at as timeline date")
 
     return {warning: values[:12] for warning, values in mapping.items()}
+
+
+def _filter_reviewed_warning_items(
+    warning_items: dict[str, list[dict[str, Any]]],
+    state: ReviewState,
+) -> dict[str, list[dict[str, Any]]]:
+    filtered: dict[str, list[dict[str, Any]]] = {}
+    for warning, items in warning_items.items():
+        values: list[dict[str, Any]] = []
+        for item in items:
+            item_id = str(item.get("item_id") or "")
+            source_note_id = str(item.get("source_note_id") or "")
+            if item_id in state.hidden_item_ids or item_id in state.excluded_item_ids:
+                continue
+            if source_note_id and source_note_id in state.excluded_source_note_ids:
+                continue
+            if item_id in state.verified_item_ids and warning in {"low_confidence", "evidence_missing", "title_only_evidence"}:
+                continue
+            dismissed = state.dismissed_warnings_by_item.get(item_id, set())
+            if warning in dismissed or "all" in dismissed:
+                continue
+            values.append(item)
+        if values:
+            filtered[warning] = values
+    return filtered
+
+
+def _suggested_review_action(warning: str, item: TimelineDisplayItem) -> str:
+    flags = set(item.quality_flags or [])
+    if warning in {"noisy_items_present", "low_value_items_present"} or flags & {"noisy_pdf", "mojibake", "scanned_document", "shopping_list", "lyric_or_song"}:
+        return "hide"
+    if warning in {"evidence_missing", "title_only_evidence", "low_confidence", "needs_fix"}:
+        return "needs-fix"
+    if item.importance >= 0.75 and item.confidence >= 0.55:
+        return "verify"
+    return "review"
+
+
+def _review_commands(item_id: str, source_note_id: str, warning: str) -> dict[str, str]:
+    safe_warning = str(warning or "review").replace('"', "'")
+    commands = {
+        "hide": f'python -m notes_lifelog_rag.cli timeline-review hide --item-id {item_id} --reason "{safe_warning}"',
+        "verify": f'python -m notes_lifelog_rag.cli timeline-review verify --item-id {item_id}',
+        "needs_fix": f'python -m notes_lifelog_rag.cli timeline-review needs-fix --item-id {item_id} --reason "{safe_warning}"',
+        "dismiss_warning": f'python -m notes_lifelog_rag.cli timeline-review dismiss-warning --item-id {item_id} --warning {warning}',
+    }
+    if source_note_id:
+        commands["exclude_note"] = f'python -m notes_lifelog_rag.cli timeline-review exclude-note --note-id {source_note_id} --reason "{safe_warning}"'
+    return commands
 
 
 def _timeline_quality_flags(items: list[MonthTimelineItem]) -> list[str]:

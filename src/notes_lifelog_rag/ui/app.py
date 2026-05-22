@@ -32,6 +32,16 @@ element.addEventListener('click', (event) => {
     trigger('click', {month_choice: monthCard.getAttribute('data-month-choice')});
     return;
   }
+  const reviewCard = event.target.closest('.timeline-review-target[data-review-item-id]');
+  if (reviewCard && element.contains(reviewCard)) {
+    trigger('click', {
+      note_choice: reviewCard.getAttribute('data-note-choice') || '',
+      review_item_id: reviewCard.getAttribute('data-review-item-id') || '',
+      review_note_id: reviewCard.getAttribute('data-review-note-id') || '',
+      review_month: reviewCard.getAttribute('data-review-month') || ''
+    });
+    return;
+  }
   const card = event.target.closest('.note-card[data-note-choice]');
   if (!card || !element.contains(card)) {
     return;
@@ -48,6 +58,17 @@ element.addEventListener('keydown', (event) => {
   if (monthCard && element.contains(monthCard)) {
     event.preventDefault();
     trigger('click', {month_choice: monthCard.getAttribute('data-month-choice')});
+    return;
+  }
+  const reviewCard = event.target.closest('.timeline-review-target[data-review-item-id]');
+  if (reviewCard && element.contains(reviewCard)) {
+    event.preventDefault();
+    trigger('click', {
+      note_choice: reviewCard.getAttribute('data-note-choice') || '',
+      review_item_id: reviewCard.getAttribute('data-review-item-id') || '',
+      review_note_id: reviewCard.getAttribute('data-review-note-id') || '',
+      review_month: reviewCard.getAttribute('data-review-month') || ''
+    });
     return;
   }
   const card = event.target.closest('.note-card[data-note-choice]');
@@ -341,6 +362,7 @@ def create_app():
                     timeline_dry_run = gr.Checkbox(label="dry run", value=True)
                     timeline_ungrouped = gr.Checkbox(label="show ungrouped items", value=False)
                     timeline_show_low_priority = gr.Checkbox(label="show low priority items", value=False)
+                    timeline_include_hidden = gr.Checkbox(label="include hidden reviewed items", value=False)
                     timeline_include_future = gr.Checkbox(label="include future months", value=False)
                     timeline_include_unknown = gr.Checkbox(label="include unknown dates", value=False)
                     timeline_btn = gr.Button("Refresh Timeline", variant="primary")
@@ -364,6 +386,15 @@ def create_app():
                             js_on_load=NOTE_CARD_CLICK_JS,
                         )
                         timeline_source_detail = gr.HTML(renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。"))
+                        timeline_review_state = gr.State({})
+                        timeline_review_status = gr.Markdown("No timeline review target selected.")
+                        timeline_review_reason = gr.Textbox(label="Review reason / comment", placeholder="noisy pdf, weak evidence, important research note...")
+                        with gr.Row():
+                            timeline_verify_btn = gr.Button("Verify")
+                            timeline_hide_btn = gr.Button("Hide")
+                            timeline_pin_btn = gr.Button("Pin")
+                            timeline_needs_fix_btn = gr.Button("Needs Fix")
+                            timeline_exclude_note_btn = gr.Button("Exclude Source Note")
                 timeline_btn.click(
                     _refresh_timeline_tab,
                     inputs=[
@@ -376,6 +407,7 @@ def create_app():
                         timeline_limit,
                         timeline_ungrouped,
                         timeline_show_low_priority,
+                        timeline_include_hidden,
                         timeline_include_future,
                         timeline_include_unknown,
                     ],
@@ -387,7 +419,30 @@ def create_app():
                     outputs=[timeline_output, timeline_detail, timeline_source_detail, timeline_state, timeline_status],
                 )
                 timeline_output.click(_select_timeline_month_card, inputs=[timeline_state, timeline_ungrouped, timeline_show_low_priority], outputs=[timeline_output, timeline_detail, timeline_source_detail], show_progress="hidden")
-                timeline_detail.click(_select_timeline_source_note, outputs=[timeline_source_detail], show_progress="hidden")
+                timeline_detail.click(
+                    _select_timeline_review_target,
+                    outputs=[timeline_source_detail, timeline_review_state, timeline_review_status],
+                    show_progress="hidden",
+                )
+                for button, action in [
+                    (timeline_verify_btn, "verify"),
+                    (timeline_hide_btn, "hide"),
+                    (timeline_pin_btn, "pin"),
+                    (timeline_needs_fix_btn, "mark_needs_fix"),
+                    (timeline_exclude_note_btn, "exclude_source_note"),
+                ]:
+                    button.click(
+                        lambda state, reason, snapshots, ungrouped, show_low_priority, action=action: _apply_timeline_review_action(
+                            action,
+                            state,
+                            reason,
+                            snapshots,
+                            ungrouped,
+                            show_low_priority,
+                        ),
+                        inputs=[timeline_review_state, timeline_review_reason, timeline_state, timeline_ungrouped, timeline_show_low_priority],
+                        outputs=[timeline_detail, timeline_source_detail, timeline_state, timeline_review_status],
+                    )
 
             with gr.Tab("Reflections"):
                 gr.Markdown("## Reflections\nMonthly reflections built from thoughts first, events second, summaries third.")
@@ -650,6 +705,7 @@ def _refresh_timeline_tab(
     limit,
     ungrouped=False,
     show_low_priority=False,
+    include_hidden=False,
     include_future=False,
     include_unknown=False,
 ):
@@ -662,6 +718,7 @@ def _refresh_timeline_tab(
         limit=int(limit),
         include_future=bool(include_future),
         include_unknown=bool(include_unknown),
+        include_hidden=bool(include_hidden),
     )
     selected_month = month if month and any(snapshot.month == month for snapshot in snapshots) else (snapshots[0].month if snapshots else None)
     selected = _snapshot_by_month(snapshots, selected_month)
@@ -714,6 +771,70 @@ def _select_timeline_source_note(evt: EventData = None):
     if not choice:
         return renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。")
     return renderers.render_note_detail(services.get_note_detail(choice))
+
+
+def _select_timeline_review_target(evt: EventData = None):
+    choice = _event_note_choice(evt)
+    payload = _event_review_payload(evt)
+    source_detail = (
+        renderers.render_note_detail(services.get_note_detail(choice))
+        if choice
+        else renderers.render_empty_state("Timeline itemを選択すると、根拠メモのdetailを表示します。")
+    )
+    if not payload.get("item_id"):
+        return source_detail, {}, "No timeline review target selected."
+    note_id = payload.get("source_note_id") or services.extract_note_id(choice)
+    payload["source_note_id"] = note_id or ""
+    status = f"Selected timeline item `{payload['item_id'][:12]}`"
+    if note_id:
+        status += f" / source note `{note_id[:12]}`"
+    return source_detail, payload, status
+
+
+def _apply_timeline_review_action(action_type: str, state: dict | None, reason: str | None, snapshots: list | None, ungrouped=False, show_low_priority=False):
+    state = state or {}
+    item_id = str(state.get("item_id") or "")
+    note_id = str(state.get("source_note_id") or "")
+    month = str(state.get("month") or "")
+    if action_type == "exclude_source_note":
+        if not note_id:
+            return (
+                renderers.render_empty_state("source_note_idがないため除外できません。"),
+                renderers.render_empty_state("source_note_idがないため除外できません。"),
+                snapshots or [],
+                "source_note_idがありません。",
+            )
+        action = services.save_timeline_review_action(
+            action_type=action_type,
+            source_note_id=note_id,
+            month=month or None,
+            reason=reason or "excluded from timeline",
+        )
+    else:
+        if not item_id:
+            return (
+                renderers.render_empty_state("Timeline itemを選択してください。"),
+                renderers.render_empty_state("Timeline itemを選択してください。"),
+                snapshots or [],
+                "Timeline item is not selected.",
+            )
+        action = services.save_timeline_review_action(
+            action_type=action_type,
+            item_id=item_id,
+            source_note_id=note_id or None,
+            month=month or None,
+            reason=reason or action_type,
+            comment=reason or "",
+        )
+    selected_month = month or (getattr((snapshots or [None])[0], "month", None) if snapshots else None)
+    refreshed = services.get_timeline_month_snapshots(year=selected_month[:4] if selected_month else None, limit=60) if selected_month else (snapshots or [])
+    selected = _snapshot_by_month(refreshed, selected_month)
+    return (
+        renderers.render_month_timeline_detail(selected, grouped=not bool(ungrouped), show_low_priority=bool(show_low_priority)),
+        renderers.render_note_detail(services.get_note_detail(note_id)) if note_id else renderers.render_empty_state("source note previewはありません。"),
+        refreshed,
+        f"Saved review action `{action.get('action_type')}`: {action.get('id')}",
+    )
 
 
 def _refresh_reflection_tab(month: str | None, force: bool):
@@ -905,6 +1026,17 @@ def _event_month_choice(evt: EventData = None) -> str | None:
         data = getattr(evt, "_data", {}) or {}
         choice = data.get("month_choice")
     return choice
+
+
+def _event_review_payload(evt: EventData = None) -> dict:
+    if evt is None:
+        return {}
+    data = getattr(evt, "_data", {}) or {}
+    return {
+        "item_id": getattr(evt, "review_item_id", None) or data.get("review_item_id") or "",
+        "source_note_id": getattr(evt, "review_note_id", None) or data.get("review_note_id") or "",
+        "month": getattr(evt, "review_month", None) or data.get("review_month") or "",
+    }
 
 
 def _snapshot_by_month(snapshots: list | None, month: str | None):

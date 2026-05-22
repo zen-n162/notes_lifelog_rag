@@ -644,8 +644,9 @@ def _render_month_timeline_item(item, *, low_priority: bool = False, grouped: bo
     sub_count = len(getattr(item, "sub_items", []) or [])
     sub_meta = f"<span>sub items {sub_count}</span>" if sub_count else ""
     click_attrs = _note_click_attrs(item.source_note_id, item.title)
+    review_attrs = _timeline_review_attrs(item.id, item.source_note_id, item.month)
     return f"""
-    <article class="note-card event-card month-item-card{extra_class}"{click_attrs}>
+    <article class="note-card event-card month-item-card timeline-review-target{extra_class}"{click_attrs}{review_attrs}>
       <div class="section-title-row">
         <h3>{escape(item.date_label or "日付不明")} · {escape(item.title)}</h3>
         <div>{render_confidence_pill(item.confidence)}{render_importance_pill(item.importance)}</div>
@@ -677,19 +678,22 @@ def _render_timeline_qa_problem_items(problem_items: dict[str, list[dict[str, An
         for item in items[:8]:
             title = str(item.get("title") or "Untitled")
             note_id = str(item.get("source_note_id") or "")
+            item_id = str(item.get("item_id") or "")
+            month = str(item.get("month") or "")
             flags = item.get("quality_flags") or []
             flag_badges = "".join(f'<span class="note-badge review">{escape(str(flag))}</span>' for flag in flags[:8])
             click_attrs = _note_click_attrs(note_id, title)
+            review_attrs = _timeline_review_attrs(item_id, note_id, month)
             rows.append(
                 f"""
-                <article class="note-card event-card qa-problem-item"{click_attrs}>
+                <article class="note-card event-card qa-problem-item timeline-review-target"{click_attrs}{review_attrs}>
                   <div class="section-title-row">
                     <h3>{escape(title)}</h3>
                     <span class="note-badge important">{escape(str(item.get("item_type") or ""))}</span>
                   </div>
                   <div class="badge-row">{flag_badges}</div>
                   <p class="muted">{escape(str(item.get("reason") or ""))}</p>
-                  <div class="note-meta"><span>{escape(note_id[:12])}</span><span>{escape(str(warning))}</span></div>
+                  <div class="note-meta"><span>{escape(note_id[:12])}</span><span>{escape(item_id[:12])}</span><span>{escape(str(warning))}</span></div>
                 </article>
                 """
             )
@@ -723,6 +727,16 @@ def _note_click_attrs(note_id: str, title: str) -> str:
     return (
         f' role="button" tabindex="0" data-note-choice="{escape(choice, quote=True)}"'
         f' aria-label="Open source note {escape(title or "Note", quote=True)}"'
+    )
+
+
+def _timeline_review_attrs(item_id: str, source_note_id: str, month: str) -> str:
+    if not item_id:
+        return ""
+    return (
+        f' data-review-item-id="{escape(str(item_id), quote=True)}"'
+        f' data-review-note-id="{escape(str(source_note_id or ""), quote=True)}"'
+        f' data-review-month="{escape(str(month or ""), quote=True)}"'
     )
 
 

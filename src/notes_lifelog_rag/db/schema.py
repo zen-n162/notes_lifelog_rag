@@ -198,6 +198,21 @@ CREATE TABLE IF NOT EXISTS monthly_timeline_items (
     created_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS timeline_review_actions (
+    id TEXT PRIMARY KEY,
+    month TEXT,
+    item_id TEXT,
+    source_note_id TEXT,
+    action_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    comment TEXT,
+    quality_flags_json TEXT,
+    item_title TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS model_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_name TEXT NOT NULL,
@@ -287,6 +302,9 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_snapshots_month ON monthly_timeline_snapshots(month)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_items_month_sort ON monthly_timeline_items(month, sort_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_monthly_timeline_items_source_note ON monthly_timeline_items(source_note_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_review_actions_month ON timeline_review_actions(month, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_review_actions_item ON timeline_review_actions(item_id, action_type, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_review_actions_note ON timeline_review_actions(source_note_id, action_type, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_runs_task_success_error ON model_runs(task_name, success, error_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_runs_note_id ON model_runs(note_id)")
 
@@ -312,6 +330,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "monthly_timeline_items", "quality_flags_json", "TEXT")
     _add_column_if_missing(conn, "monthly_timeline_items", "grouped_item_ids_json", "TEXT")
     _add_column_if_missing(conn, "monthly_timeline_items", "sub_items_json", "TEXT")
+    _add_column_if_missing(conn, "timeline_review_actions", "item_title", "TEXT")
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

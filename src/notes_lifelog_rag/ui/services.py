@@ -31,6 +31,13 @@ from notes_lifelog_rag.timeline.service import (
     list_timeline_months,
     timeline_qa,
 )
+from notes_lifelog_rag.timeline.review import (
+    format_reanalysis_plan,
+    list_review_actions,
+    reanalysis_plan_rows,
+    revert_review_action,
+    upsert_review_action,
+)
 
 DEFAULT_NOTE_LIMIT = 80
 
@@ -50,6 +57,7 @@ def get_db_stats(db_path: str | Path | None = None) -> dict[str, int]:
         "monthly_reflections",
         "monthly_timeline_snapshots",
         "monthly_timeline_items",
+        "timeline_review_actions",
         "model_runs",
         "import_errors",
     ]
@@ -525,6 +533,7 @@ def get_timeline_month_snapshots(
     limit: int = 24,
     include_future: bool = False,
     include_unknown: bool = False,
+    include_hidden: bool = False,
     db_path: str | Path | None = None,
 ) -> list[MonthTimelineSnapshot]:
     order = "asc" if sort == "chronological_asc" else "desc"
@@ -535,6 +544,7 @@ def get_timeline_month_snapshots(
         limit=int(limit),
         include_future=include_future,
         include_unknown=include_unknown,
+        include_hidden=include_hidden,
     )
     if category:
         snapshots = [snapshot for snapshot in snapshots if category in snapshot.dominant_categories or category in snapshot.key_themes]
@@ -581,6 +591,8 @@ def get_timeline_qa(
     *,
     include_future: bool = False,
     include_unknown: bool = False,
+    include_hidden: bool = False,
+    include_reviewed: bool = False,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     return timeline_qa(
@@ -588,8 +600,45 @@ def get_timeline_qa(
         all_months=all_months,
         include_future=include_future,
         include_unknown=include_unknown,
+        include_hidden=include_hidden,
+        include_reviewed=include_reviewed,
         db_path=db_path,
     )
+
+
+def timeline_review_actions(month: str | None = None, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    return [action.to_dict() for action in list_review_actions(month=month, db_path=db_path)]
+
+
+def save_timeline_review_action(
+    *,
+    action_type: str,
+    item_id: str | None = None,
+    source_note_id: str | None = None,
+    month: str | None = None,
+    reason: str | None = None,
+    comment: str | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    action = upsert_review_action(
+        action_type=action_type,
+        item_id=item_id,
+        source_note_id=source_note_id,
+        month=month,
+        reason=reason,
+        comment=comment,
+        db_path=db_path,
+    )
+    return action.to_dict()
+
+
+def revert_timeline_review_action(action_id: str, db_path: str | Path | None = None) -> dict[str, Any] | None:
+    action = revert_review_action(action_id, db_path=db_path)
+    return action.to_dict() if action else None
+
+
+def timeline_reanalysis_plan(month: str | None = None, db_path: str | Path | None = None) -> str:
+    return format_reanalysis_plan(reanalysis_plan_rows(month=month, db_path=db_path))
 
 
 def get_reflection(month: str | None = None, db_path: str | Path | None = None) -> ReflectionReport:

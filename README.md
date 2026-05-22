@@ -466,6 +466,59 @@ hidden by default from `timeline-months` and `timeline-qa`; use
 `--include-future` to audit them. Unknown-date buckets such as `1900-01` remain
 hidden unless `--include-unknown` is provided.
 
+### Timeline Review Workflow
+
+Phase 9 adds a local curation layer for Timeline QA. Review actions are stored in
+`timeline_review_actions`; they never delete notes, summaries, events, thoughts,
+or generated timeline rows. The goal is to let the month cards become
+reviewable memory cards: noisy items can be hidden, important items can be
+verified or pinned, and weak items can be marked for reanalysis.
+
+Review actions:
+
+- `verify`: mark an item as human-checked; weak evidence/low-confidence warning
+  impact is softened in Timeline QA.
+- `hide`: hide an item from normal Timeline/QA/report output; use
+  `--include-hidden` to audit hidden items.
+- `pin`: prioritize an item in Main Timeline Items.
+- `needs-fix`: keep the item visible in QA and add it to the reanalysis plan.
+- `dismiss-warning`: dismiss one warning for an item.
+- `exclude-note`: exclude a noisy source note from Timeline generation/display
+  without removing it from the notes database.
+- `revert` / `restore-note`: undo a review action.
+
+CLI examples:
+
+```bash
+python -m notes_lifelog_rag.cli timeline-review list --month 2026-05
+python -m notes_lifelog_rag.cli timeline-review hide --item-id ITEM_ID --reason "noisy pdf"
+python -m notes_lifelog_rag.cli timeline-review verify --item-id ITEM_ID --comment "重要な研究メモ"
+python -m notes_lifelog_rag.cli timeline-review pin --item-id ITEM_ID
+python -m notes_lifelog_rag.cli timeline-review needs-fix --item-id ITEM_ID --reason "weak evidence"
+python -m notes_lifelog_rag.cli timeline-review exclude-note --note-id NOTE_ID --reason "scanner noise"
+python -m notes_lifelog_rag.cli timeline-review revert --action-id ACTION_ID
+python -m notes_lifelog_rag.cli timeline-review reanalysis-plan --month 2026-05 \
+  --output data/exports/timelines/reanalysis_plan_2026-05.md
+```
+
+QA Markdown/JSON reports now include `item_id`, `source_note_id`,
+`suggested_action`, available review actions, and example review commands for
+each problem item. A typical review loop is:
+
+1. Generate or refresh the timeline.
+2. Export QA: `timeline-qa --all-months --only-problems --show-items --format markdown`.
+3. Hide scanner/PDF noise, verify important items, and mark weak evidence as
+   needs-fix.
+4. Run `timeline-review reanalysis-plan` to collect notes that should be
+   summarized, event-extracted, thought-extracted, or evidence-enriched.
+5. Regenerate the affected month with `generate-timeline --month YYYY-MM --force`.
+
+The GUI Timeline tab exposes the same workflow: select a Timeline item or QA
+problem card, inspect the source note preview, enter a reason/comment, then use
+Verify, Hide, Pin, Needs Fix, or Exclude Source Note. Low Priority items remain
+collapsed by default, and hidden items can be checked with the include-hidden
+controls in CLI/report flows.
+
 Other useful warnings:
 
 - `suggestions_dominated`: suggestions still outnumber direct thought/event/

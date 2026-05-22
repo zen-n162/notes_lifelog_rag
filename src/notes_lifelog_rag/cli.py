@@ -48,12 +48,22 @@ from notes_lifelog_rag.timeline.service import (
     list_timeline_months,
     timeline_qa,
 )
+from notes_lifelog_rag.timeline.review import (
+    format_reanalysis_plan,
+    list_excluded_notes,
+    list_review_actions,
+    reanalysis_plan_rows,
+    revert_review_action,
+    upsert_review_action,
+)
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Local-first Apple Notes lifelog RAG CLI.",
 )
+timeline_review_app = typer.Typer(help="Review and curate Timeline items.")
+app.add_typer(timeline_review_app, name="timeline-review")
 console = Console()
 
 
@@ -117,6 +127,7 @@ def stats_command(
             "monthly_reflections",
             "monthly_timeline_snapshots",
             "monthly_timeline_items",
+            "timeline_review_actions",
             "model_runs",
             "chunk_embeddings",
             "import_errors",
@@ -876,12 +887,13 @@ def timeline_command(
     show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in rich output.")] = False,
     hide_low_priority: Annotated[bool, typer.Option("--hide-low-priority", help="Hide low priority timeline items in rich output.")] = False,
     low_priority_limit: Annotated[int, typer.Option("--low-priority-limit", min=0, help="Low priority item count in rich grouped output.")] = 3,
+    include_hidden: Annotated[bool, typer.Option("--include-hidden", help="Include hidden/excluded reviewed timeline items.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     use_grouped = grouped_flag or not ungrouped
     if rich or monthly or all_months or year:
         if month and not monthly and not all_months:
-            snapshot = get_month_timeline_snapshot(month, db_path=db, generate_if_missing=True)
+            snapshot = get_month_timeline_snapshot(month, db_path=db, generate_if_missing=True, include_hidden=include_hidden)
             console.print(
                 format_month_timeline_markdown(
                     snapshot,
@@ -901,6 +913,7 @@ def timeline_command(
             limit=limit if limit else None,
             include_unknown=include_unknown,
             include_future=include_future,
+            include_hidden=include_hidden,
         )
         console.print(
             format_timeline_report(
@@ -1047,6 +1060,7 @@ def timeline_report_command(
     show_low_priority: Annotated[bool, typer.Option("--show-low-priority", help="Show all low priority timeline items in report output.")] = False,
     hide_low_priority: Annotated[bool, typer.Option("--hide-low-priority", help="Hide low priority timeline items in report output.")] = False,
     low_priority_limit: Annotated[int, typer.Option("--low-priority-limit", min=0, help="Low priority item count in grouped report output.")] = 3,
+    include_hidden: Annotated[bool, typer.Option("--include-hidden", help="Include hidden/excluded reviewed timeline items in report output.")] = False,
     db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
 ) -> None:
     use_grouped = grouped_flag or not ungrouped
@@ -1059,6 +1073,7 @@ def timeline_report_command(
         order=order,
         include_unknown=include_unknown,
         include_future=include_future,
+        include_hidden=include_hidden,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -1082,6 +1097,8 @@ def timeline_qa_command(
     all_months: Annotated[bool, typer.Option("--all-months", help="Check every month.")] = False,
     include_unknown: Annotated[bool, typer.Option("--include-unknown", help="Include unknown-date months such as 1900-01.")] = False,
     include_future: Annotated[bool, typer.Option("--include-future", help="Include future months that have no direct note/event/thought sources.")] = False,
+    include_hidden: Annotated[bool, typer.Option("--include-hidden", help="Include hidden/excluded reviewed timeline items in QA.")] = False,
+    include_reviewed: Annotated[bool, typer.Option("--include-reviewed", help="Include reviewed/dismissed warning items in QA output.")] = False,
     show_items: Annotated[bool, typer.Option("--show-items", help="Show item previews for each QA row.")] = False,
     only_problems: Annotated[bool, typer.Option("--only-problems", help="Only show months with QA warnings.")] = False,
     format_name: Annotated[str, typer.Option("--format", help="Output format: table, pretty, markdown, or json.")] = "table",
@@ -1101,6 +1118,8 @@ def timeline_qa_command(
         db_path=db,
         include_unknown=include_unknown,
         include_future=include_future,
+        include_hidden=include_hidden,
+        include_reviewed=include_reviewed,
         show_items=show_items or format_value in {"pretty", "markdown", "json"},
         only_problems=only_problems,
     )
@@ -1151,6 +1170,140 @@ def timeline_qa_command(
             values.append(json.dumps(row.get("problem_items") or row.get("warning_items") or row.get("items") or [], ensure_ascii=False))
         table.add_row(*values)
     console.print(table)
+
+
+@timeline_review_app.command("list")
+def timeline_review_list_command(
+    month: Annotated[str | None, typer.Option("--month", help="Filter by YYYY-MM month.")] = None,
+    status: Annotated[str | None, typer.Option("--status", help="active or reverted.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    _print_timeline_review_actions(list_review_actions(month=month, status=status, db_path=db))
+
+
+@timeline_review_app.command("hide")
+def timeline_review_hide_command(
+    item_id: Annotated[str, typer.Option("--item-id", help="Timeline item id to hide.")],
+    reason: Annotated[str, typer.Option("--reason", help="Reason for hiding the item.")] = "",
+    comment: Annotated[str, typer.Option("--comment", help="Optional review comment.")] = "",
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    note_id: Annotated[str | None, typer.Option("--note-id", help="Source note id, inferred when possible.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = _upsert_item_review_action("hide", item_id, month, note_id, reason, comment, db)
+    _print_timeline_review_actions([action])
+
+
+@timeline_review_app.command("verify")
+def timeline_review_verify_command(
+    item_id: Annotated[str, typer.Option("--item-id", help="Timeline item id to verify.")],
+    comment: Annotated[str, typer.Option("--comment", help="Optional review comment.")] = "",
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    note_id: Annotated[str | None, typer.Option("--note-id", help="Source note id, inferred when possible.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = _upsert_item_review_action("verify", item_id, month, note_id, "", comment, db)
+    _print_timeline_review_actions([action])
+
+
+@timeline_review_app.command("pin")
+def timeline_review_pin_command(
+    item_id: Annotated[str, typer.Option("--item-id", help="Timeline item id to pin.")],
+    comment: Annotated[str, typer.Option("--comment", help="Optional review comment.")] = "",
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    note_id: Annotated[str | None, typer.Option("--note-id", help="Source note id, inferred when possible.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = _upsert_item_review_action("pin", item_id, month, note_id, "", comment, db)
+    _print_timeline_review_actions([action])
+
+
+@timeline_review_app.command("needs-fix")
+def timeline_review_needs_fix_command(
+    item_id: Annotated[str, typer.Option("--item-id", help="Timeline item id that needs reanalysis/fix.")],
+    reason: Annotated[str, typer.Option("--reason", help="Reason this item needs fixing.")] = "",
+    comment: Annotated[str, typer.Option("--comment", help="Optional review comment.")] = "",
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    note_id: Annotated[str | None, typer.Option("--note-id", help="Source note id, inferred when possible.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = _upsert_item_review_action("mark_needs_fix", item_id, month, note_id, reason, comment, db)
+    _print_timeline_review_actions([action])
+
+
+@timeline_review_app.command("dismiss-warning")
+def timeline_review_dismiss_warning_command(
+    item_id: Annotated[str, typer.Option("--item-id", help="Timeline item id.")],
+    warning: Annotated[str, typer.Option("--warning", help="Warning name to dismiss, or all.")],
+    comment: Annotated[str, typer.Option("--comment", help="Optional review comment.")] = "",
+    month: Annotated[str | None, typer.Option("--month", help="YYYY-MM month.")] = None,
+    note_id: Annotated[str | None, typer.Option("--note-id", help="Source note id, inferred when possible.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = _upsert_item_review_action("dismiss_warning", item_id, month, note_id, warning, comment, db)
+    _print_timeline_review_actions([action])
+
+
+@timeline_review_app.command("exclude-note")
+def timeline_review_exclude_note_command(
+    note_id: Annotated[str, typer.Option("--note-id", help="Source note id to exclude from Timeline.")],
+    reason: Annotated[str, typer.Option("--reason", help="Reason for excluding this source note.")] = "",
+    comment: Annotated[str, typer.Option("--comment", help="Optional review comment.")] = "",
+    month: Annotated[str | None, typer.Option("--month", help="Optional YYYY-MM month context.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = upsert_review_action(
+        action_type="exclude_source_note",
+        month=month,
+        source_note_id=note_id,
+        reason=reason,
+        comment=comment,
+        db_path=db,
+    )
+    _print_timeline_review_actions([action])
+
+
+@timeline_review_app.command("list-excluded-notes")
+def timeline_review_list_excluded_notes_command(
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    _print_timeline_review_actions(list_excluded_notes(db_path=db))
+
+
+@timeline_review_app.command("restore-note")
+def timeline_review_restore_note_command(
+    note_id: Annotated[str, typer.Option("--note-id", help="Source note id to restore.")],
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    actions = [action for action in list_excluded_notes(db_path=db) if action.source_note_id == note_id]
+    for action in actions:
+        revert_review_action(action.id, db_path=db)
+    console.print(f"[green]Restored source note:[/green] {note_id} ({len(actions)} action(s) reverted)")
+
+
+@timeline_review_app.command("revert")
+def timeline_review_revert_command(
+    action_id: Annotated[str, typer.Option("--action-id", help="Review action id to revert.")],
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    action = revert_review_action(action_id, db_path=db)
+    _print_timeline_review_actions([action] if action else [])
+
+
+@timeline_review_app.command("reanalysis-plan")
+def timeline_review_reanalysis_plan_command(
+    month: Annotated[str | None, typer.Option("--month", help="Filter by YYYY-MM month.")] = None,
+    output: Annotated[Path | None, typer.Option("--output", help="Markdown output path.")] = None,
+    db: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    rows = reanalysis_plan_rows(month=month, db_path=db)
+    rendered = format_reanalysis_plan(rows)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8")
+        console.print(f"[green]Wrote reanalysis plan:[/green] {output}")
+        return
+    typer.echo(rendered.rstrip())
 
 
 @app.command("qa-report")
@@ -1433,6 +1586,93 @@ def _update_progress(progress: Progress, task_id: int, done: int, total: int, la
     display_total = max(total, 1)
     display_done = display_total if total == 0 else min(done, display_total)
     progress.update(task_id, description=label, total=display_total, completed=display_done)
+
+
+def _upsert_item_review_action(
+    action_type: str,
+    item_id: str,
+    month: str | None,
+    note_id: str | None,
+    reason: str,
+    comment: str,
+    db: Path | None,
+):
+    context = _timeline_item_context(item_id, db)
+    action = upsert_review_action(
+        action_type=action_type,
+        month=month or context.get("month"),
+        item_id=item_id,
+        source_note_id=note_id or context.get("source_note_id"),
+        reason=reason,
+        comment=comment,
+        quality_flags=context.get("quality_flags") or [],
+        item_title=context.get("title") or "",
+        db_path=db,
+    )
+    return action
+
+
+def _timeline_item_context(item_id: str, db: Path | None) -> dict[str, object]:
+    init_db(db)
+    with connect(db) as conn:
+        row = conn.execute(
+            """
+            SELECT month, title, source_note_id, quality_flags_json
+            FROM monthly_timeline_items
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """
+                SELECT month, title, source_note_id, quality_flags_json
+                FROM monthly_timeline_items
+                WHERE grouped_item_ids_json LIKE ?
+                ORDER BY importance DESC
+                LIMIT 1
+                """,
+                (f"%{item_id}%",),
+            ).fetchone()
+    if not row:
+        return {}
+    try:
+        flags = json.loads(row["quality_flags_json"] or "[]")
+    except json.JSONDecodeError:
+        flags = []
+    return {
+        "month": row["month"] or "",
+        "title": row["title"] or "",
+        "source_note_id": row["source_note_id"] or "",
+        "quality_flags": flags if isinstance(flags, list) else [],
+    }
+
+
+def _print_timeline_review_actions(actions) -> None:
+    table = Table(title="Timeline Review Actions")
+    table.add_column("ID")
+    table.add_column("Month")
+    table.add_column("Action")
+    table.add_column("Status")
+    table.add_column("Item")
+    table.add_column("Source note")
+    table.add_column("Reason")
+    table.add_column("Updated")
+    for action in actions:
+        table.add_row(
+            action.id,
+            action.month or "-",
+            action.action_type,
+            action.status,
+            (action.item_title or action.item_id or "-")[:60],
+            action.source_note_id[:12] if action.source_note_id else "-",
+            (action.reason or action.comment or "-")[:80],
+            action.updated_at[:19],
+        )
+    if not actions:
+        table.add_row("-", "-", "-", "-", "-", "-", "No review actions found.", "-")
+    console.print(table)
 
 
 if __name__ == "__main__":
